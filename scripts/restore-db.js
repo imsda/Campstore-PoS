@@ -1,0 +1,1 @@
+require('./env').loadEnv(); const fs=require('fs'); const src=process.argv[2]; if(!src) throw Error('Usage: npm run restore -- backups/file.sqlite'); fs.copyFileSync(src,process.env.DATABASE_PATH||'./data/campstore.sqlite'); console.log('Restored '+src);

@@ -1,0 +1,1 @@
+{"scripts":{"start":"node server.js","dev":"node server.js","setup":"node scripts/setup-db.js","test":"node --test","validate:env":"node scripts/validate-env.js","backup":"node scripts/backup-db.js","restore":"node scripts/restore-db.js"},"dependencies":{"better-sqlite3":"^11.10.0","dotenv":"^16.4.7","express":"^4.21.2","googleapis":"^144.0.0"},"devDependencies":{}}

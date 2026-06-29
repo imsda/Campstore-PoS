@@ -1,0 +1,1 @@
+require('./env').loadEnv(); const missing=['GOOGLE_SPREADSHEET_ID','GOOGLE_SERVICE_ACCOUNT_EMAIL','GOOGLE_PRIVATE_KEY'].filter(k=>!process.env[k]); if(missing.length){console.warn('Missing Google Sheets settings:',missing.join(', ')); process.exitCode=1}else console.log('Environment looks ready for Google Sheets sync.');

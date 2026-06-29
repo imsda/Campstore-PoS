@@ -1,0 +1,1 @@
+require('./env').loadEnv(); const fs=require('fs'), path=require('path'); const src=process.env.DATABASE_PATH||'./data/campstore.sqlite'; fs.mkdirSync('backups',{recursive:true}); const dest=`backups/campstore-${new Date().toISOString().replace(/[:.]/g,'-')}.sqlite`; fs.copyFileSync(src,dest); console.log(dest);
