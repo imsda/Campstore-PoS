@@ -34,15 +34,15 @@ Open `http://localhost:3077`. Unauthenticated users are sent to the login screen
 Set these environment variables before running `npm run setup` or starting the app for the first time:
 
 ```bash
-DEFAULT_OWNER_USERNAME=owner
-DEFAULT_OWNER_PASSWORD=change-this-long-password
-DEFAULT_OWNER_DISPLAY_NAME="Camp Store Owner"
-SESSION_SECRET="change-this-random-session-secret"
+DEFAULT_OWNER_USERNAME=admin
+DEFAULT_OWNER_PASSWORD=change-me-now
+DEFAULT_OWNER_DISPLAY_NAME=Administrator
+SESSION_SECRET=change-me-to-a-long-random-secret
 ```
 
-`npm run setup` initializes the SQLite database, applies migrations, and creates or updates the default `OWNER` user from these values. Passwords are stored as salted `scrypt` hashes in SQLite, never as plain text.
+`npm run setup` initializes the SQLite database, applies migrations, creates the `users` table when needed, and seeds the default `OWNER` user from these values only when no users exist yet. Passwords are stored as salted `scrypt` hashes in SQLite, never as plain text. The setup output prints the seeded username, but never prints the password.
 
-For first login, open `http://localhost:3077` after setup and sign in with `DEFAULT_OWNER_USERNAME` and `DEFAULT_OWNER_PASSWORD`. No manual SQL is required. If you change the default owner variables later, run `npm run setup` again to update that owner account, including its password, display name, role, and active status.
+For first login, open `http://localhost:3077` after setup and sign in with `DEFAULT_OWNER_USERNAME` and `DEFAULT_OWNER_PASSWORD`. No manual SQL is required. After the first login, immediately change the default password or create named owner/admin/clerk users and stop using the bootstrap password.
 
 ## Roles and access
 
@@ -66,13 +66,13 @@ All POS data API endpoints require a valid login. Admin APIs additionally requir
 Run these commands from the application directory on the server. They use the configured `.env` database path and application password hashing, so no manual SQL is required.
 
 ```bash
-npm run list-users
-npm run create-user -- clerk1 temporary-password "Store Clerk" CLERK
-npm run create-user -- admin1 temporary-password "Store Admin" ADMIN
-npm run change-password -- clerk1 new-temporary-password
+npm run users:list
+npm run users:create -- username password "Display Name" CLERK
+npm run users:create -- admin1 temporary-password "Store Admin" ADMIN
+npm run users:password -- username newPassword
 ```
 
-Roles are `OWNER`, `ADMIN`, and `CLERK`; `create-user` defaults to `CLERK` when the role is omitted. Keep `SESSION_SECRET` stable across restarts so existing sessions remain valid; change it when you intentionally want to invalidate all sessions.
+Roles are `OWNER`, `ADMIN`, and `CLERK`; `users:create` defaults to `CLERK` when the role is omitted. Keep `SESSION_SECRET` stable across restarts so existing sessions remain valid; change it when you intentionally want to invalidate all sessions.
 
 ## Google Sheets setup
 
