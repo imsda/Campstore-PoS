@@ -1,1 +1,3 @@
-require('../server'); setTimeout(()=>process.exit(0),500);
+require('../server');
+console.log('Database setup complete.');
+setTimeout(() => process.exit(0), 100);
