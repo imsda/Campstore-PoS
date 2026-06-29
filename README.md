@@ -4,8 +4,11 @@ Local-first point of sale web app for the Iowa-Missouri Conference camp store. T
 
 ## Features
 
+- Login-first access pattern with signed HTTP-only session cookies.
+- Local SQLite users with hashed passwords and roles: `OWNER`, `ADMIN`, and `CLERK`.
 - Clerk POS screen with searchable campers and items, touch-friendly cart, quantity controls, current balance, and new balance preview.
-- Admin/backend control screen for status, settings, imports, sync, diagnostics, and recent transactions.
+- CafeScanner-style layout: light gray background, centered cards, compact top nav, and blue primary actions.
+- Admin/backend control screen for dashboard stats, status, settings, imports, sync, diagnostics, recent transactions, and user management.
 - SQLite live operational database with WAL enabled.
 - Google Sheets import/sync:
   - `Items` tab: column A `Cost`, column B `Item Name`.
@@ -24,7 +27,45 @@ npm run setup
 npm start
 ```
 
-Open `http://localhost:3077` for the clerk screen and `http://localhost:3077/admin.html` for admin.
+Open `http://localhost:3077`. Unauthenticated users are sent to the login screen. After login, clerks go to the Clerk POS page and owners/admins can use `http://localhost:3077/admin.html`.
+
+## Default owner setup
+
+Set these environment variables before running `npm run setup` or starting the app for the first time:
+
+```bash
+DEFAULT_OWNER_USERNAME=owner
+DEFAULT_OWNER_PASSWORD=change-this-long-password
+DEFAULT_OWNER_DISPLAY_NAME="Camp Store Owner"
+SESSION_SECRET="change-this-random-session-secret"
+```
+
+When the app starts, it creates the default `OWNER` user if that username does not already exist. Passwords are stored as salted `scrypt` hashes in SQLite, never as plain text.
+
+If you add the default owner variables after the database already exists, restart the app once; the owner will be created if the username is not present.
+
+## Roles and access
+
+- `OWNER`: full access to Clerk POS, admin/backend controls, settings, import/sync, diagnostics, transactions, and user management.
+- `ADMIN`: access to Clerk POS and admin/backend controls, including settings, import/sync, diagnostics, and transactions.
+- `CLERK`: access only to the Clerk POS sale workflow.
+
+All POS data API endpoints require a valid login. Admin APIs additionally require `OWNER` or `ADMIN`; user-management APIs require `OWNER`.
+
+## Creating and changing users
+
+### In the app
+
+1. Sign in as an `OWNER`.
+2. Open **Dashboard → User Management**.
+3. Enter username, display name, role, and a temporary password.
+4. Select **Create user**.
+
+### Direct SQLite maintenance
+
+Prefer the in-app user management screen so passwords are hashed correctly. If you must maintain users directly, generate password hashes through the application code path rather than inserting plain text into `users.password_hash`.
+
+To rotate the default owner password after first setup, sign in as an `OWNER`, create a new owner or use an application/API password-change flow, then remove or rotate the old credentials. Keep `SESSION_SECRET` stable across restarts so existing sessions remain valid; change it when you intentionally want to invalidate all sessions.
 
 ## Google Sheets setup
 
@@ -58,7 +99,13 @@ npm run setup
 npm start
 ```
 
-Set `APP_VERSION` in the environment during deployment if you want a release name; otherwise the app reports the current git commit when available.
+Deployment notes:
+
+- Set `DEFAULT_OWNER_USERNAME`, `DEFAULT_OWNER_PASSWORD`, and `DEFAULT_OWNER_DISPLAY_NAME` before the first run.
+- Set a strong `SESSION_SECRET` in production.
+- Set `COOKIE_SECURE=true` when serving only over HTTPS.
+- Keep the SQLite database and `backups/` directory on persistent storage.
+- Set `APP_VERSION` in the environment during deployment if you want a release name; otherwise the app reports the current git commit when available.
 
 ## Backup and restore
 
@@ -82,6 +129,8 @@ The importer warns about duplicate child names and rejects invalid money values.
 
 ## Troubleshooting
 
+- `Invalid username or password`: verify the user exists and is active in SQLite, or recreate an owner with the default owner environment variables on a fresh database.
+- `Authentication required`: sign in again; sessions expire after 12 hours.
 - `Google Sheets credentials are not configured`: check `.env` values and restart the service.
 - Pending transactions remain after sync: inspect Admin status events and transaction errors.
 - Incorrect camper balance in Sheets: local transactions are authoritative; run Push pending transactions, then verify the camper row in `Campers / Balances`.
