@@ -15,7 +15,7 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 migrate();
-seedDefaultOwner();
+const INITIAL_SEED_RESULT = seedDefaultOwner();
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: false }));
@@ -32,7 +32,7 @@ function migrate(){
  setDefault('allow_over_balance', String(process.env.ALLOW_OVER_BALANCE === 'true'));
 }
 function setDefault(k,v){db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)').run(k,v)}
-function seedDefaultOwner(){const username=process.env.DEFAULT_OWNER_USERNAME, password=process.env.DEFAULT_OWNER_PASSWORD; if(!username||!password) return; const display=process.env.DEFAULT_OWNER_DISPLAY_NAME||username; const stamp=now(); const existing=db.prepare('SELECT id FROM users WHERE username=?').get(username); if(existing){db.prepare("UPDATE users SET display_name=?,role='OWNER',password_hash=?,active=1,updated_at=? WHERE id=?").run(display,hashPassword(password),stamp,existing.id); return} db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('user_'+nanoid(),username,display,'OWNER',hashPassword(password),1,stamp,stamp)}
+function seedDefaultOwner(){const existingCount=db.prepare('SELECT count(*) c FROM users').get().c; if(existingCount>0) return {seeded:false,reason:'users-exist'}; const username=process.env.DEFAULT_OWNER_USERNAME, password=process.env.DEFAULT_OWNER_PASSWORD; if(!username||!password) return {seeded:false,reason:'missing-env'}; const display=process.env.DEFAULT_OWNER_DISPLAY_NAME||username; const stamp=now(); db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('user_'+nanoid(),username,display,'OWNER',hashPassword(password),1,stamp,stamp); return {seeded:true,username}}
 function hashPassword(password){const salt=randomBytes(16).toString('hex'); const hash=scryptSync(password,salt,64).toString('hex'); return `scrypt$${salt}$${hash}`}
 function verifyPassword(password,stored){const [scheme,salt,hash]=String(stored||'').split('$'); if(scheme!=='scrypt'||!salt||!hash) return false; const actual=Buffer.from(hash,'hex'); const check=scryptSync(password,salt,64); return actual.length===check.length && timingSafeEqual(actual,check)}
 function sign(value){return createHmac('sha256',SESSION_SECRET).update(value).digest('base64url')}
@@ -41,7 +41,7 @@ function parseCookies(req){return Object.fromEntries(String(req.headers.cookie||
 function currentUser(req){const token=parseCookies(req).campstore_session; if(!token) return null; const [payload,sig]=token.split('.'); if(!payload||sig!==sign(payload)) return null; try{const data=JSON.parse(Buffer.from(payload,'base64url').toString()); if(data.exp<Date.now()) return null; const user=db.prepare('SELECT id,username,display_name,role,active FROM users WHERE id=? AND active=1').get(data.id); return user?{id:user.id,username:user.username,displayName:user.display_name,role:user.role}:null}catch{return null}}
 function requireAuth(req,res,next){const user=currentUser(req); if(!user) return wantsHtml(req)?res.redirect('/login.html'):res.status(401).json({error:'Authentication required'}); req.user=user; next()}
 function requireRole(...roles){return (req,res,next)=>{if(!req.user) return requireAuth(req,res,()=>requireRole(...roles)(req,res,next)); const min=Math.min(...roles.map(r=>ROLES[r])); if(ROLES[req.user.role]<min) return wantsHtml(req)?res.status(403).send('Forbidden'):res.status(403).json({error:'Forbidden'}); next()}}
-function wantsHtml(req){return (req.headers.accept||'').includes('text/html') || !req.path.startsWith('/api/')}
+function wantsHtml(req){return (req.headers.accept||'').includes('text/html') || !(req.originalUrl||req.path).startsWith('/api/')}
 function cents(v){ if (typeof v === 'number') return Math.round(v*100); const s=String(v||'').replace(/[$,]/g,'').trim(); if(!s) throw Error('missing money value'); const n=Number(s); if(Number.isNaN(n)) throw Error('invalid money value '+v); return Math.round(n*100)}
 function money(c){return (c/100).toFixed(2)}
 function now(){return new Date().toISOString()}
@@ -68,4 +68,4 @@ app.get('/api/users',requireRole('OWNER'),(req,res)=>res.json(db.prepare('SELECT
 app.post('/api/users',requireRole('OWNER'),(req,res)=>{const {username,password,displayName,role}=req.body||{}; if(!username||!password||!ROLES[role]) return res.status(400).json({error:'username, password, and role are required'}); const stamp=now(); db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('user_'+nanoid(),username,displayName||username,role,hashPassword(password),1,stamp,stamp); res.json({ok:true})});
 app.post('/api/users/:id/password',requireRole('OWNER'),(req,res)=>{if(!req.body?.password) return res.status(400).json({error:'password is required'}); db.prepare('UPDATE users SET password_hash=?,updated_at=? WHERE id=?').run(hashPassword(req.body.password),now(),req.params.id); res.json({ok:true})});
 if (require.main === module) app.listen(process.env.PORT||3077,()=>console.log(`Camp Store POS running on ${process.env.PORT||3077}`));
-module.exports = { app, db, hashPassword };
+module.exports = { app, db, hashPassword, migrate, seedDefaultOwner, initialSeedResult: INITIAL_SEED_RESULT };
