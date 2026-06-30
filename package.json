@@ -12,7 +12,8 @@
     "list-users": "node scripts/list-users.js",
     "users:list": "node scripts/list-users.js",
     "users:create": "node scripts/create-user.js",
-    "users:password": "node scripts/change-password.js"
+    "users:password": "node scripts/change-password.js",
+    "people:create": "node scripts/create-person.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",

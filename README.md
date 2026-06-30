@@ -114,7 +114,7 @@ Admins can also add items manually and edit item name, cost, category, active/en
 
 ## People/Campers and Google Sheets workflow
 
-People/campers still import from Google Sheets, while local SQLite remains the operational source during POS use. Unsynced local sales and balance adjustments are not wiped by camper imports.
+People/campers can be managed directly in local SQLite and can also import from Google Sheets. Local SQLite remains the operational source during POS use. Unsynced local sales, balance adjustments, and manually-created people are not wiped by camper imports.
 
 ### Google Sheets setup from the Admin UI
 
@@ -145,7 +145,29 @@ Rows begin on row 2. Blank rows are skipped. Duplicate camper names and invalid 
 
 ### People management and audit behavior
 
-Use **Admin → People** to search imported people and view child/camper name, initial balance, current balance, last imported/updated timestamp, active/enabled status, and notes. Admins can locally correct display names, notes, and active/enabled status.
+Use **Admin → People** to search imported or manual people and view name, type (`Camper`, `Staff`, or `Other`), initial balance, current balance, source (`google` or `manual`), last imported/updated timestamp, active/enabled status, and notes. Admins can add a person without Google Sheets configured, edit manually-created and imported people, and disable a person without deleting them. Active people immediately appear in the Clerk POS search because both screens read from local SQLite.
+
+To manually test a person from the UI:
+
+1. Sign in as an `OWNER` or `ADMIN`.
+2. Open **Admin → People**.
+3. Fill in **Name**, **Type**, **Initial balance**, **Current balance**, **Active/enabled**, and optional **Notes**.
+4. Click **Add Person**. The person is saved with `source: manual`, and a local audit log entry records timestamp, admin user, `manual_person_create`, name, initial balance, and current balance.
+5. Open the Clerk page and search for the person by name. If active/enabled is checked, the person appears immediately.
+
+For quick seed/testing from the command line, run:
+
+```bash
+npm run people:create -- "Test Camper" 25
+```
+
+An optional third argument sets the type (`Camper`, `Staff`, or `Other`):
+
+```bash
+npm run people:create -- "Test Staff" 10 Staff
+```
+
+Google imports upsert by case-insensitive name. Manual records use separate IDs and are not overwritten by unrelated Google rows; if a Google row intentionally matches a local person's name, the import updates that matching person and marks the source as `google`.
 
 Manual balance changes must use the balance adjustment actions:
 
