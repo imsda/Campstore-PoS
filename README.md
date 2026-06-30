@@ -1,6 +1,6 @@
 # Camp Store POS
 
-Local-first point of sale web app for the Iowa-Missouri Conference camp store. The clerk workflow is optimized for fast camper lookup, cart entry, balance preview, checkout, local transaction logging, and queued Google Sheets sync.
+Local-first point of sale web app for the Iowa-Missouri Conference camp store. The clerk workflow is optimized for fast camper lookup, cart entry, balance preview, checkout, local transaction logging, and queued Google Sheets sync. Local SQLite is always the operational database: every sale is immediately saved locally, and Google Sheets availability does not block store operation.
 
 ## Features
 
@@ -14,7 +14,7 @@ Local-first point of sale web app for the Iowa-Missouri Conference camp store. T
 - Google Sheets import/sync for people/campers and balances:
   - `Campers / Balances` tab: column A `Child Name`, column B `Initial Balance`, column C `Current Balance`.
   - `Logs` tab receives transaction and balance-adjustment rows with timestamp, user, child, balances, totals/amounts, details, ID, and type.
-- Offline queue: sales update local balances immediately and remain pending until sync succeeds.
+- Pending Google Sync queue: every sale updates local SQLite balances immediately and is only queued while it waits to upload to Google Sheets.
 - Duplicate-resistant sync through generated transaction IDs.
 - Backup/restore scripts and environment validation.
 
@@ -114,7 +114,7 @@ Admins can also add items manually and edit item name, cost, category, active/en
 
 ## People/Campers and Google Sheets workflow
 
-People/campers can be managed directly in local SQLite and can also import from Google Sheets. Local SQLite remains the operational source during POS use. Unsynced local sales, balance adjustments, and manually-created people are not wiped by camper imports.
+People/campers can be managed directly in local SQLite and can also import from Google Sheets. Local SQLite is always the operational database during POS use. Every sale is immediately saved locally, so the application continues functioning normally if Google Sheets is unavailable. Pending Google Sync only refers to transactions and balance adjustments waiting to upload to Google Sheets; it does not mean a sale is incomplete locally. Unsynced local sales, balance adjustments, and manually-created people are not wiped by camper imports.
 
 ### Google Sheets setup from the Admin UI
 
@@ -183,10 +183,10 @@ Use **Admin → Import/Sync**:
 
 - **Test Connection** validates credentials, configured tabs, and edit access.
 - **Import People/Campers from Google Sheets** imports the configured Campers/Balances range `A2:C`.
-- **Push Pending Transactions/Logs** appends unsynced local sales and balance adjustment logs to `Logs`, then updates camper current balances in `Campers / Balances`.
-- **Sync Balances** runs the same pending sync operation for current balances and logs.
+- **Push Pending Google Sync Transactions/Logs** appends unsynced local sales and balance adjustment logs to `Logs`, then updates camper current balances in `Campers / Balances`.
+- **Sync Balances** runs the same Pending Google Sync operation for current balances and logs.
 
-The dashboard shows Google Sheets status, last import time, last sync time, pending sync count, active people, active items, and daily sales metrics.
+The dashboard shows Google Sheets status, last import time, last sync time, Pending Google Sync count, active people, active items, and daily sales metrics.
 
 ### Service account sharing instructions
 
@@ -237,8 +237,10 @@ Back up before imports, before updates, and at the end of store days.
 
 - Complete sales normally while offline.
 - The local SQLite database is the source of truth during store operation.
-- Transactions with `sync_status` other than `synced` are pending.
-- When internet returns, use Admin → Push Pending Transactions/Logs.
+- Every sale is immediately saved to the local SQLite database.
+- Transactions with `sync_status` other than `synced` are Pending Google Sync entries waiting to upload to Google Sheets.
+- The application continues functioning normally when Google Sheets is unavailable; balances and checkout use local SQLite.
+- When internet returns or Google Sheets is configured, use Admin → Push Pending Google Sync Transactions/Logs.
 
 ## Sheet validation notes
 
@@ -249,6 +251,6 @@ The people importer rejects duplicate child names and camper balance errors. The
 - `Invalid username or password`: verify the user exists and is active in SQLite, or recreate an owner with the default owner environment variables on a fresh database.
 - `Authentication required`: sign in again; sessions expire after 12 hours.
 - `Google Sheets credentials are not configured`: open Admin → Configuration and save Spreadsheet ID, service account email, and private key; `.env` remains a fallback.
-- Pending transactions remain after sync: inspect Admin status events and transaction errors.
-- Incorrect camper balance in Sheets: local transactions are authoritative; run Push pending transactions, then verify the camper row in `Campers / Balances`.
-- Import caution: importing does not intentionally overwrite local unsynced transaction logs. Perform pending sync before a new operating day import when possible.
+- Pending Google Sync transactions remain after sync: inspect Admin status events and transaction errors.
+- Incorrect camper balance in Sheets: local transactions are authoritative; run Push Pending Google Sync transactions, then verify the camper row in `Campers / Balances`.
+- Import caution: importing does not intentionally overwrite local unsynced transaction logs. Perform Pending Google Sync before a new operating day import when possible.

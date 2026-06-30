@@ -46,7 +46,7 @@ async function load() {
     return;
   }
   state = await r.json();
-  $('sync').textContent = `Pending sync: ${state.pending}`;
+  $('sync').textContent = `Pending Google Sync: ${state.pendingGoogleSync ?? state.pending} Transactions`;
   $('userBadge').textContent = `${state.user.displayName} · ${state.user.role}`;
   if (state.user.role === 'CLERK') $('adminLink').style.display = 'none';
   if (selected) selected = state.campers.find(c => c.id === selected.id) || selected;
@@ -181,7 +181,7 @@ async function checkout() {
   await load();
   const updated = state.campers.find(c => c.id === data.camperId);
   if (updated) updated.current_balance_cents = data.new_balance_cents;
-  toast('success', '✓ Sale Complete', [saleName, fmt(saleTotal), 'Queued for sync']);
+  toast('success', '✓ Sale Complete', [saleName, fmt(saleTotal), 'Queued for Google Sync']);
   resetSaleWorkflow();
 }
 
