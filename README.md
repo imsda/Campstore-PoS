@@ -10,10 +10,10 @@ Local-first point of sale web app for the Iowa-Missouri Conference camp store. T
 - CafeScanner-style layout: light gray background, centered cards, compact top nav, and blue primary actions.
 - Admin/backend control screen for dashboard stats, Google Sheets configuration, status, settings, imports, sync, diagnostics, recent transactions, and user management.
 - SQLite live operational database with WAL enabled.
-- Google Sheets import/sync:
-  - `Items` tab: column A `Cost`, column B `Item Name`, column C `Category`.
+- Items are managed in-app from CSV uploads or manual Admin edits; local SQLite is the source of truth after import.
+- Google Sheets import/sync for people/campers and balances:
   - `Campers / Balances` tab: column A `Child Name`, column B `Initial Balance`, column C `Current Balance`.
-  - `Logs` tab receives transaction append rows with timestamp, clerk, child, balances, total, purchased items, transaction ID, and status.
+  - `Logs` tab receives transaction and balance-adjustment rows with timestamp, user, child, balances, totals/amounts, details, ID, and type.
 - Offline queue: sales update local balances immediately and remain pending until sync succeeds.
 - Duplicate-resistant sync through generated transaction IDs.
 - Backup/restore scripts and environment validation.
@@ -74,56 +74,104 @@ npm run users:password -- username newPassword
 
 Roles are `OWNER`, `ADMIN`, and `CLERK`; `users:create` defaults to `CLERK` when the role is omitted. Keep `SESSION_SECRET` stable across restarts so existing sessions remain valid; change it when you intentionally want to invalidate all sessions.
 
-## Google Sheets setup from the Admin UI
+## Items CSV workflow
+
+Items are no longer imported from Google Sheets. Use **Admin → Items** to manage the item catalog. Clerks only see items marked active/enabled.
+
+### CSV template
+
+Download the template from **Admin → Items → Download CSV Template**. The template contains:
+
+```csv
+Cost,Item Name,Category,Active,SKU,Notes
+1.50,Snack,Food,true,SNACK-001,Example item
+```
+
+Required columns:
+
+- `Cost`
+- `Item Name`
+- `Category`
+
+Optional columns:
+
+- `Active`
+- `SKU`
+- `Notes`
+
+### CSV import behavior
+
+1. Open **Admin → Items**.
+2. Paste a CSV into the import box or upload a `.csv` file.
+3. Click **Preview CSV** to validate rows before applying.
+4. Fix validation errors if reported.
+5. Optionally check **Disable items not present in this CSV** when the CSV should be the full active catalog.
+6. Click **Apply CSV Import**.
+
+The importer skips blank rows, validates missing/invalid costs, missing item names, missing categories, and duplicate item names in the same category. Imports upsert by `Item Name + Category`; existing items are not deleted by default. The optional disable-missing checkbox hides omitted items without deleting historical transaction data.
+
+Admins can also add items manually and edit item name, cost, category, active/enabled status, SKU, and notes from the Items table.
+
+## People/Campers and Google Sheets workflow
+
+People/campers still import from Google Sheets, while local SQLite remains the operational source during POS use. Unsynced local sales and balance adjustments are not wiped by camper imports.
+
+### Google Sheets setup from the Admin UI
 
 Google Sheets can be configured after first setup without editing `.env`. Existing `.env` values are still used as fallback defaults until settings are saved in SQLite.
 
 1. Sign in as an `OWNER` or `ADMIN`. `CLERK` users cannot open the admin configuration screen or call the settings/import/sync APIs.
-2. Open **Admin → Configuration**.
-3. Paste the full **Google Sheet URL** from your browser address bar. A raw spreadsheet ID is also accepted for advanced users; the app extracts and stores the spreadsheet ID automatically.
+2. Open **Admin → Settings**.
+3. Paste the full **Google Sheet URL** from your browser address bar. A raw spreadsheet ID is also accepted.
 4. Confirm or edit the tab names:
-   - **Items tab name** defaults to `Items`.
    - **Campers/Balances tab name** defaults to `Campers / Balances`.
    - **Logs tab name** defaults to `Logs`.
-5. Paste or upload the full service account JSON key. The app auto-fills the service account email and private key from `client_email` and `private_key`. Advanced manual service account email/private key fields remain available if needed.
-6. Click **Save Google Settings**. The sheet URL, extracted spreadsheet ID, tab names, service account email, and private key are stored locally in SQLite. The private key is not displayed back in full; the UI only shows configured/masked status.
-7. Click **Test Google Connection**. The test verifies that the spreadsheet opens, the configured Items, Campers/Balances, and Logs tabs exist, and the service account has edit access.
+5. Paste or upload the full service account JSON key. The app auto-fills the service account email and private key from `client_email` and `private_key`.
+6. Click **Save Google Settings**.
+7. Click **Test Google Connection**. The test verifies that the spreadsheet opens, the configured Campers/Balances and Logs tabs exist, and the service account has edit access.
 
-### Required Google Sheet tabs and columns
+### Required People sheet columns
 
-Create these tabs, or configure matching custom tab names in **Admin → Configuration**:
+Create these tabs, or configure matching custom tab names in **Admin → Settings**:
 
-- `Items` (default Items tab)
-  - Column A: `Cost`
-  - Column B: `Item Name`
-  - Column C: `Category`
-- `Campers / Balances` (default Campers/Balances tab)
+- `Campers / Balances`
   - Column A: `Child Name`
   - Column B: `Initial Balance`
   - Column C: `Current Balance`
-- `Logs` (default Logs tab)
-  - Transaction logs are appended here during sync.
+- `Logs`
+  - Transaction and balance-adjustment logs are appended here during sync.
 
-Rows begin on row 2. Blank rows are skipped. Item rows with missing item names or invalid costs are skipped with detailed Admin UI warnings; item rows with missing categories import as `Uncategorized` with warnings. Invalid tab names and duplicate camper names are reported as detailed errors in the Admin UI.
+Rows begin on row 2. Blank rows are skipped. Duplicate camper names and invalid balances are reported as Admin UI errors.
+
+### People management and audit behavior
+
+Use **Admin → People** to search imported people and view child/camper name, initial balance, current balance, last imported/updated timestamp, active/enabled status, and notes. Admins can locally correct display names, notes, and active/enabled status.
+
+Manual balance changes must use the balance adjustment actions:
+
+- **Add funds**
+- **Subtract funds**
+- **Set balance**
+
+Each balance adjustment requires a reason and writes a local audit log entry with the admin, camper, action, previous balance, new balance, reason, and sync status.
+
+### Import/sync workflow
+
+Use **Admin → Import/Sync**:
+
+- **Test Connection** validates credentials, configured tabs, and edit access.
+- **Import People/Campers from Google Sheets** imports the configured Campers/Balances range `A2:C`.
+- **Push Pending Transactions/Logs** appends unsynced local sales and balance adjustment logs to `Logs`, then updates camper current balances in `Campers / Balances`.
+- **Sync Balances** runs the same pending sync operation for current balances and logs.
+
+The dashboard shows Google Sheets status, last import time, last sync time, pending sync count, active people, active items, and daily sales metrics.
 
 ### Service account sharing instructions
 
 1. In Google Cloud, create a service account and enable the Google Sheets API for the project.
 2. Create/download a JSON key for the service account.
-3. Open the Google Sheet, click **Share**, and share it with the service account `client_email` as **Editor**. Editor access is required so pending transactions can append to Logs and update camper balances.
-4. Paste or upload the full JSON into **Admin → Configuration**. The app will auto-fill the service account email and private key.
-
-### Import/sync workflow
-
-Use **Admin → Configuration** or the dashboard import/sync card:
-
-- **Test Connection** validates credentials, configured tabs, and edit access.
-- **Import Items from configured Items tab** imports the configured Items tab range `A2:C` and reports imported item counts by category when the import completes.
-- **Import Campers from configured Campers/Balances tab** imports the configured Campers/Balances tab range `A2:C`.
-- **Import Everything** imports items and campers/balances.
-- **Push Pending Transactions to Logs and balances** appends unsynced local sales to the configured Logs tab and updates camper current balances in the configured Campers/Balances tab.
-
-The dashboard shows Google Sheets status, last import time, last sync time, pending sync count, total items, and item counts by category.
+3. Open the Google Sheet, click **Share**, and share it with the service account `client_email` as **Editor**.
+4. Paste or upload the full JSON into **Admin → Settings**.
 
 ## Deployment/update approach
 
@@ -168,11 +216,11 @@ Back up before imports, before updates, and at the end of store days.
 - Complete sales normally while offline.
 - The local SQLite database is the source of truth during store operation.
 - Transactions with `sync_status` other than `synced` are pending.
-- When internet returns, use Admin → Push pending transactions.
+- When internet returns, use Admin → Push Pending Transactions/Logs.
 
 ## Sheet validation notes
 
-The importer rejects duplicate child names and camper balance errors. Item import skips blank rows, warns and skips missing item names or invalid costs, and warns when a category is missing. Avoid renaming tabs or moving required columns.
+The people importer rejects duplicate child names and camper balance errors. The item CSV importer skips blank rows and reports missing Cost, invalid Cost, missing Item Name, missing Category, and duplicate item names within the same category. Avoid renaming Google people/log tabs or moving required people columns.
 
 ## Troubleshooting
 
