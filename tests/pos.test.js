@@ -53,6 +53,48 @@ test('items support category data', () => {
   assert.deepEqual(item, { name: 'Flashlight', cost_cents: 250, category: 'Camping', active: 1 });
 });
 
+test('roster importer detects UltraCamp exports and reconciles cabins + balances', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'campstore-roster-')), 'test.sqlite');
+  process.env.DATABASE_PATH = dbPath;
+  process.env.DEFAULT_OWNER_USERNAME = 'owner4';
+  process.env.DEFAULT_OWNER_PASSWORD = 'secret123';
+  process.env.SESSION_SECRET = 'test-session-secret-4';
+  delete require.cache[require.resolve('../server')];
+  const { db, parseRosterCsv, reconcilePlan } = require('../server');
+
+  // Store Deposits export: two rows for the same idPerson must sum, cabin comes from facilityName.
+  const deposits = 'idPerson,amount,nameFirst,nameLast,facilityName\n'
+    + '1,25.00,Bryce,Allred,Coyote\n'
+    + '1,20.00,Bryce,Allred,Coyote\n'
+    + '2,15.00,Julian,Allen,Raccoon\n';
+  const parsed = parseRosterCsv(deposits);
+  assert.equal(parsed.format, 'ultracamp_deposits');
+  assert.equal(parsed.people.length, 2);
+  const bryce = parsed.people.find(p => p.name === 'Bryce Allred');
+  assert.equal(bryce.balance, 4500); // $25 + $20 summed to cents
+  assert.equal(bryce.cabin, 'Coyote');
+  assert.equal(bryce.external_id, '1');
+
+  // Cabin Assignments export (no amount) is detected as cabins-only.
+  const cabins = 'idPerson,nameFirst,nameLast,facilityName\n3,Ada,Kaufman,Cardinal\n';
+  assert.equal(parseRosterCsv(cabins).format, 'ultracamp_cabins');
+
+  // Applying deposits to an existing camper adjusts current balance by the deposit delta.
+  const stamp = new Date().toISOString();
+  db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,external_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
+    .run('camper_test', 'Bryce Allred', 'Camper', 2000, 1200, 1, 'ultracamp', '1', stamp);
+  const plan = reconcilePlan(parsed, { updateCabins: true, reconcileBalances: true, createNew: true });
+  const brycePlan = plan.items.find(i => i.name === 'Bryce Allred');
+  assert.equal(brycePlan.type, 'update');
+  assert.equal(brycePlan.balanceChange.mode, 'deposit');
+  assert.equal(brycePlan.balanceChange.delta, 2500);       // 4500 new initial − 2000 old initial
+  assert.equal(brycePlan.balanceChange.toCurrent, 3700);   // 1200 current + 2500 delta (spending preserved)
+  assert.equal(plan.summary.newPeople, 1);                 // Julian Allen is new
+});
+
 test('migration upgrades older items table before category is referenced', () => {
   const fs = require('node:fs');
   const os = require('node:os');

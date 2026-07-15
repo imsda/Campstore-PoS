@@ -1,4 +1,4 @@
-let state = {}, selected = null, cart = [], selectedCategory = null, saleCamperId = null;
+let state = {}, selected = null, cart = [], selectedCategory = null, saleCamperId = null, selectedCabin = null;
 const $ = id => document.getElementById(id), fmt = c => '$' + (c / 100).toFixed(2);
 
 async function logout() {
@@ -33,6 +33,7 @@ function resetSaleWorkflow() {
   $('itemSearch').value = '';
   $('selected').className = 'balance-card muted';
   $('selected').textContent = 'No camper selected';
+  renderCabins();
   renderCampers();
   renderItems();
   renderCart();
@@ -50,19 +51,53 @@ async function load() {
   $('userBadge').textContent = `${state.user.displayName} · ${state.user.role}`;
   if (state.user.role === 'CLERK') $('adminLink').style.display = 'none';
   if (selected) selected = state.campers.find(c => c.id === selected.id) || selected;
+  renderCabins();
   renderCampers();
   renderItems();
   renderCart();
   renderSelected();
 }
 
+function cabinList() {
+  const map = new Map();
+  for (const c of state.campers) {
+    const cab = (c.cabin || '').trim();
+    if (!cab) { map.set('__none', (map.get('__none') || 0) + 1); continue; }
+    map.set(cab, (map.get(cab) || 0) + 1);
+  }
+  const named = [...map.entries()].filter(([k]) => k !== '__none').sort((a, b) => a[0].localeCompare(b[0]));
+  if (map.has('__none')) named.push(['__none', map.get('__none')]);
+  return named;
+}
+
+function renderCabins() {
+  const host = $('cabinBar');
+  if (!host) return;
+  const cabins = cabinList();
+  if (!cabins.length || (cabins.length === 1 && cabins[0][0] === '__none')) { host.innerHTML = ''; host.style.display = 'none'; return; }
+  host.style.display = 'flex';
+  const chip = (key, label, count, active) => `<button class="cabin-chip ${active ? 'active' : ''}" onclick="selectCabin(${key === null ? 'null' : `'${encodeURIComponent(key)}'`})">${esc(label)}${count != null ? `<span class="cabin-count">${count}</span>` : ''}</button>`;
+  host.innerHTML = chip(null, 'All cabins', state.campers.length, !selectedCabin) +
+    cabins.map(([k, n]) => chip(k, k === '__none' ? 'No cabin' : k, n, selectedCabin === k)).join('');
+}
+
+function selectCabin(key) {
+  selectedCabin = key === null ? null : decodeURIComponent(key);
+  $('camperSearch').value = '';
+  renderCabins();
+  renderCampers();
+}
+
 function renderCampers() {
-  const q = $('camperSearch').value.toLowerCase();
-  $('campers').innerHTML = state.campers
-    .filter(c => c.name.toLowerCase().includes(q))
-    .slice(0, 30)
-    .map(c => `<div class="row ${selected?.id === c.id ? 'selected' : ''} ${saleCamperId && saleCamperId !== c.id ? 'locked-choice' : ''}" onclick="selectCamper('${c.id}')"><b>${esc(c.name)}</b><br><span class="muted">Current: ${fmt(c.current_balance_cents)}</span></div>`)
-    .join('');
+  const q = $('camperSearch').value.toLowerCase().trim();
+  let list = state.campers;
+  if (selectedCabin && !q) list = list.filter(c => (selectedCabin === '__none' ? !(c.cabin || '').trim() : (c.cabin || '').trim() === selectedCabin));
+  if (q) list = list.filter(c => c.name.toLowerCase().includes(q));
+  $('campers').innerHTML = list
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .slice(0, 60)
+    .map(c => `<div class="row ${selected?.id === c.id ? 'selected' : ''} ${saleCamperId && saleCamperId !== c.id ? 'locked-choice' : ''}" onclick="selectCamper('${c.id}')"><b>${esc(c.name)}</b>${c.cabin ? `<span class="cabin-tag">${esc(c.cabin)}</span>` : ''}<br><span class="muted">Current: ${fmt(c.current_balance_cents)}</span></div>`)
+    .join('') || '<p class="muted">No campers match. Try a different cabin or search.</p>';
 }
 
 function renderSelected() {
