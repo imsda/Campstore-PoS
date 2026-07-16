@@ -77,6 +77,10 @@ function renderCabinOptions() {
   dl.innerHTML = names.map(n => `<option value="${esc(n)}">`).join('');
 }
 
+// encodeURIComponent leaves ' untouched, which would terminate the single-quoted
+// inline handler string; %27 round-trips through decodeURIComponent.
+function uriArg(s) { return encodeURIComponent(s).replace(/'/g, '%27'); }
+
 function renderCabins() {
   renderCabinOptions();
   const host = $('cabinBar');
@@ -84,7 +88,7 @@ function renderCabins() {
   const cabins = cabinList();
   if (!cabins.length || (cabins.length === 1 && cabins[0][0] === '__none')) { host.innerHTML = ''; host.style.display = 'none'; return; }
   host.style.display = 'flex';
-  const chip = (key, label, count, active) => `<button class="cabin-chip ${active ? 'active' : ''}" onclick="selectCabin(${key === null ? 'null' : `'${encodeURIComponent(key)}'`})">${esc(label)}${count != null ? `<span class="cabin-count">${count}</span>` : ''}</button>`;
+  const chip = (key, label, count, active) => `<button class="cabin-chip ${active ? 'active' : ''}" onclick="selectCabin(${key === null ? 'null' : `'${uriArg(key)}'`})">${esc(label)}${count != null ? `<span class="cabin-count">${count}</span>` : ''}</button>`;
   host.innerHTML = chip(null, 'All cabins', state.campers.length, !selectedCabin) +
     cabins.map(([k, n]) => chip(k, k === '__none' ? 'No cabin' : k, n, selectedCabin === k)).join('');
 }
@@ -150,7 +154,7 @@ function renderItems() {
   if (!q && !selectedCategory) {
     $('items').innerHTML = categories().map(c => {
       const count = state.items.filter(i => (i.category || 'Uncategorized') === c).length;
-      return `<button class="item category-card" onclick="selectCategory('${encodeURIComponent(c)}')"><b>${esc(c)}</b><br><span class="muted">${count} item${count === 1 ? '' : 's'}</span></button>`;
+      return `<button class="item category-card" onclick="selectCategory('${uriArg(c)}')"><b>${esc(c)}</b><br><span class="muted">${count} item${count === 1 ? '' : 's'}</span></button>`;
     }).join('') || '<p class="muted">No items imported yet.</p>';
     return;
   }

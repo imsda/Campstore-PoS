@@ -165,11 +165,11 @@ function parseRosterCsv(text){
 function findCamperForRoster(p){ if(p.external_id){const byId=db.prepare('SELECT * FROM campers WHERE external_id=?').get(p.external_id); if(byId) return byId} return db.prepare("SELECT * FROM campers WHERE lower(name)=lower(?) ORDER BY (external_id IS NULL), source='manual' DESC LIMIT 1").get(p.name) }
 function reconcilePlan(parsed,opts){
  const isDeposit=parsed.format==='ultracamp_deposits';
- const items=[]; const summary={newPeople:0,cabinChanges:0,balanceChanges:0,unchanged:0,totalBalanceDelta:0};
+ const items=[]; const summary={newPeople:0,skippedNew:0,cabinChanges:0,balanceChanges:0,unchanged:0,totalBalanceDelta:0};
  for(const p of parsed.people){
   const existing=findCamperForRoster(p);
   const entry={name:p.name,cabin:p.cabin,external_id:p.external_id,existingId:existing?.id||null};
-  if(!existing){entry.type='new'; entry.newBalance=p.hasBalance?p.balance:0; summary.newPeople++; summary.totalBalanceDelta+=entry.newBalance; items.push(entry); continue}
+  if(!existing){ if(!opts.createNew){summary.skippedNew++; continue} entry.type='new'; entry.newBalance=p.hasBalance?p.balance:0; summary.newPeople++; summary.totalBalanceDelta+=entry.newBalance; items.push(entry); continue}
   entry.currentCabin=existing.cabin||null; entry.currentBalance=existing.current_balance_cents;
   let changed=false;
   if(opts.updateCabins&&p.cabin&&(existing.cabin||'')!==p.cabin){entry.cabinChange={from:existing.cabin||null,to:p.cabin}; summary.cabinChanges++; changed=true}

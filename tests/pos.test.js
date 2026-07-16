@@ -93,6 +93,14 @@ test('roster importer detects UltraCamp exports and reconciles cabins + balances
   assert.equal(brycePlan.balanceChange.delta, 2500);       // 4500 new initial − 2000 old initial
   assert.equal(brycePlan.balanceChange.toCurrent, 3700);   // 1200 current + 2500 delta (spending preserved)
   assert.equal(plan.summary.newPeople, 1);                 // Julian Allen is new
+  assert.equal(plan.summary.totalBalanceDelta, 2500 + 1500); // Bryce delta + Julian's new balance
+
+  // With "Create new campers" off, the preview must not promise creations or count their balances.
+  const noCreate = reconcilePlan(parsed, { updateCabins: true, reconcileBalances: true, createNew: false });
+  assert.equal(noCreate.summary.newPeople, 0);
+  assert.equal(noCreate.summary.skippedNew, 1);
+  assert.equal(noCreate.summary.totalBalanceDelta, 2500);  // only Bryce's deposit delta
+  assert.ok(!noCreate.items.some(i => i.type === 'new'));
 });
 
 test('walk-up add, cabin move, and optimistic-concurrency save', async () => {
