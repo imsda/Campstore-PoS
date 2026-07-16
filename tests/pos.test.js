@@ -53,6 +53,100 @@ test('items support category data', () => {
   assert.deepEqual(item, { name: 'Flashlight', cost_cents: 250, category: 'Camping', active: 1 });
 });
 
+test('roster importer detects UltraCamp exports and reconciles cabins + balances', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'campstore-roster-')), 'test.sqlite');
+  process.env.DATABASE_PATH = dbPath;
+  process.env.DEFAULT_OWNER_USERNAME = 'owner4';
+  process.env.DEFAULT_OWNER_PASSWORD = 'secret123';
+  process.env.SESSION_SECRET = 'test-session-secret-4';
+  delete require.cache[require.resolve('../server')];
+  const { db, parseRosterCsv, reconcilePlan } = require('../server');
+
+  // Store Deposits export: two rows for the same idPerson must sum, cabin comes from facilityName.
+  const deposits = 'idPerson,amount,nameFirst,nameLast,facilityName\n'
+    + '1,25.00,Bryce,Allred,Coyote\n'
+    + '1,20.00,Bryce,Allred,Coyote\n'
+    + '2,15.00,Julian,Allen,Raccoon\n';
+  const parsed = parseRosterCsv(deposits);
+  assert.equal(parsed.format, 'ultracamp_deposits');
+  assert.equal(parsed.people.length, 2);
+  const bryce = parsed.people.find(p => p.name === 'Bryce Allred');
+  assert.equal(bryce.balance, 4500); // $25 + $20 summed to cents
+  assert.equal(bryce.cabin, 'Coyote');
+  assert.equal(bryce.external_id, '1');
+
+  // Cabin Assignments export (no amount) is detected as cabins-only.
+  const cabins = 'idPerson,nameFirst,nameLast,facilityName\n3,Ada,Kaufman,Cardinal\n';
+  assert.equal(parseRosterCsv(cabins).format, 'ultracamp_cabins');
+
+  // Applying deposits to an existing camper adjusts current balance by the deposit delta.
+  const stamp = new Date().toISOString();
+  db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,external_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
+    .run('camper_test', 'Bryce Allred', 'Camper', 2000, 1200, 1, 'ultracamp', '1', stamp);
+  const plan = reconcilePlan(parsed, { updateCabins: true, reconcileBalances: true, createNew: true });
+  const brycePlan = plan.items.find(i => i.name === 'Bryce Allred');
+  assert.equal(brycePlan.type, 'update');
+  assert.equal(brycePlan.balanceChange.mode, 'deposit');
+  assert.equal(brycePlan.balanceChange.delta, 2500);       // 4500 new initial − 2000 old initial
+  assert.equal(brycePlan.balanceChange.toCurrent, 3700);   // 1200 current + 2500 delta (spending preserved)
+  assert.equal(plan.summary.newPeople, 1);                 // Julian Allen is new
+  assert.equal(plan.summary.totalBalanceDelta, 2500 + 1500); // Bryce delta + Julian's new balance
+
+  // With "Create new campers" off, the preview must not promise creations or count their balances.
+  const noCreate = reconcilePlan(parsed, { updateCabins: true, reconcileBalances: true, createNew: false });
+  assert.equal(noCreate.summary.newPeople, 0);
+  assert.equal(noCreate.summary.skippedNew, 1);
+  assert.equal(noCreate.summary.totalBalanceDelta, 2500);  // only Bryce's deposit delta
+  assert.ok(!noCreate.items.some(i => i.type === 'new'));
+});
+
+test('walk-up add, cabin move, and optimistic-concurrency save', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'campstore-live-')), 'test.sqlite');
+  process.env.DATABASE_PATH = dbPath;
+  process.env.DEFAULT_OWNER_USERNAME = 'owner5';
+  process.env.DEFAULT_OWNER_PASSWORD = 'secret123';
+  process.env.SESSION_SECRET = 'test-session-secret-5';
+  delete require.cache[require.resolve('../server')];
+  const { app } = require('../server');
+  const server = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'owner5', password: 'secret123' }) });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const post = (p, b) => fetch(base + p, { method: 'POST', headers: { 'Content-Type': 'application/json', cookie }, body: JSON.stringify(b) });
+  try {
+    // Walk-up registration creates an active camper with a starting balance.
+    let r = await post('/api/campers/quick-add', { name: 'Walkup Wanda', cabin: 'Bear', initial_balance: '30.00' });
+    assert.equal(r.status, 200);
+    const created = (await r.json()).camper;
+    assert.equal(created.current_balance_cents, 3000);
+    assert.equal(created.initial_balance_cents, 3000);
+    assert.equal(created.cabin, 'Bear');
+    assert.equal(created.active, 1);
+
+    // Cabin move only changes the cabin.
+    r = await post(`/api/campers/${created.id}/cabin`, { cabin: 'Coyote' });
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).cabin, 'Coyote');
+
+    // A save carrying a stale updated_at is rejected with 409 instead of clobbering.
+    r = await post(`/api/campers/${created.id}`, { name: 'Walkup Wanda', expected_updated_at: created.updated_at, current_balance: '30.00', initial_balance: '30.00' });
+    assert.equal(r.status, 409);
+    assert.equal((await r.json()).conflict, true);
+
+    // The camper appears in the clerk state feed for other stations.
+    const state = await (await fetch(`${base}/api/state`, { headers: { cookie } })).json();
+    assert.ok(state.campers.find(c => c.id === created.id));
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
 test('migration upgrades older items table before category is referenced', () => {
   const fs = require('node:fs');
   const os = require('node:os');

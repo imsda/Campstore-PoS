@@ -6,7 +6,10 @@ Local-first point of sale web app for the Iowa-Missouri Conference camp store. T
 
 - Login-first access pattern with signed HTTP-only session cookies.
 - Local SQLite users with hashed passwords and roles: `OWNER`, `ADMIN`, and `CLERK`.
-- Clerk POS screen with searchable campers, searchable items, category browsing, touch-friendly cart, quantity controls, current balance, and new balance preview.
+- Clerk POS screen with a **cabin group selector** (tap a cabin to see just the kids in it), searchable campers, searchable items, category browsing, touch-friendly cart, quantity controls, current balance, and new balance preview. Optimized for phones/tablets.
+- **Roster & balance reconciliation** from UltraCamp exports (Cabin Assignments and Store Deposits) or any generic `Cabin, Child Name, Balance` CSV, with a preview-before-apply report.
+- **CSV exports** for people/balances, transactions, balance adjustments, and inventory — straight from local SQLite, so they work offline.
+- **Inventory management**: optional per-item stock counts that decrement on each sale, low/out-of-stock indicators, quick restock, and a dashboard alert.
 - CafeScanner-style layout: light gray background, centered cards, compact top nav, and blue primary actions.
 - Admin/backend control screen for dashboard stats, Google Sheets configuration, status, settings, imports, sync, diagnostics, recent transactions, and user management.
 - SQLite live operational database with WAL enabled.
@@ -194,6 +197,35 @@ The dashboard shows Google Sheets status, last import time, last sync time, Pend
 2. Create/download a JSON key for the service account.
 3. Open the Google Sheet, click **Share**, and share it with the service account `client_email` as **Editor**.
 4. Paste or upload the full JSON into **Admin → Settings**.
+
+## Cabins (Clerk POS)
+
+Every person can have a **cabin**. On the Clerk POS screen, a row of cabin chips appears above the camper search. Tapping a cabin filters the list to just the kids in that cabin (with a count on each chip); "All cabins" clears the filter, and typing in the search box searches across everyone regardless of cabin. This makes finding a camper on a phone fast — pick the cabin, tap the name. Cabins are populated by the reconciliation import below, or edited per person in **Admin → People**. Admin → People also has a cabin filter and a cabin column.
+
+## Roster & balance reconciliation
+
+Use **Admin → Reconcile** to load a roster and reconcile balances from a CSV. The file is auto-detected and you always see a **preview report** (new campers, cabin changes, balance changes, unchanged, and the net balance delta) before anything is written. Nothing is applied until you press **Apply Reconciliation**.
+
+Supported files:
+
+- **UltraCamp "Cabin Assignments" export** — detected by `facilityName` + `nameFirst`/`nameLast`. Sets each camper's cabin from `facilityName` and creates any campers not already present (with a $0 starting balance). Campers are matched by `idPerson` (stored as an external ID) first, then by name, so re-imports and the deposits file line up exactly and duplicates are avoided.
+- **UltraCamp "Store Deposits" export** — detected by `amount` + name columns. A camper can have several deposit rows; the importer **sums all deposits per person** to get the total funded amount, and also reads the cabin from `facilityName`. Reconciling in this mode sets the camper's **initial balance** to the deposit total and moves the **current balance by the same delta**, so mid-week top-ups are added on top of the local balance without erasing purchases already recorded in the POS.
+- **Generic CSV** — any file with a name column plus optional `Cabin` and `Balance` columns (download the template from **Admin → Reconcile → Download Template**). In this mode the `Balance` column is treated as the camper's target **current** balance and set directly.
+
+Apply options (all on by default): **Update cabins**, **Reconcile balances**, and **Create new campers**. Every balance change is written as an audited balance adjustment (admin, camper, previous/new balance, reason) and queued for Google Sync, exactly like a manual adjustment. The dashboard shows a **Last reconcile** time.
+
+## CSV exports
+
+**Admin → Export** downloads a current snapshot straight from local SQLite (works even when Google Sheets is offline):
+
+- **People & Balances** — name, type, cabin, initial/current balance, source, external ID, active, notes.
+- **Transactions** — every sale with itemized details and sync status.
+- **Balance Adjustments** — the full adjustment/reconciliation audit trail.
+- **Inventory** — items with cost, category, and stock.
+
+## Inventory management
+
+Items can optionally track stock. In **Admin → Items**, the **Stock** column shows each item's count; leave it blank to leave an item untracked. Stock is color-coded (green in stock, amber low, red out) using `LOW_STOCK_THRESHOLD` (default `5`). Every sale automatically decrements the stock of tracked items. Use the **Restock** button (or edit the Stock field and **Save**) to add/remove units, and check **Show low/out of stock only** to focus on what needs reordering. The dashboard shows a **Low / out of stock** alert tile, and stock never blocks a sale (offline-first: the POS always completes the sale and lets stock go negative if needed).
 
 ## Deployment/update approach
 
