@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const { db, hashPassword } = require('../server');
+const { now } = require('../datetime');
 
 const ROLES = new Set(['OWNER', 'ADMIN', 'CLERK']);
 
@@ -17,7 +18,7 @@ if (!username || !password || !ROLES.has(role)) {
 }
 
 const displayName = displayNameArg || username;
-const stamp = new Date().toISOString();
+const stamp = now();
 const id = `user_${cryptoRandomId()}`;
 
 try {

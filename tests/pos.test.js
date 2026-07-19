@@ -1,4 +1,5 @@
-const test = require('node:test'); const assert = require('node:assert'); const fs = require('node:fs'); const path = require('node:path');
+const test = require('node:test');
+const { now, formatDateTime, getBusinessDateKey } = require('../datetime'); const assert = require('node:assert'); const fs = require('node:fs'); const path = require('node:path');
 test('money math stays in cents',()=>{assert.equal(125+375,500)});
 test('transaction ids should be externally identifiable',()=>{assert.match('tx_abc123',/^tx_/)});
 
@@ -48,7 +49,7 @@ test('items support category data', () => {
   const { db } = require('../server');
   const cols = db.prepare('PRAGMA table_info(items)').all().map(c => c.name);
   assert.ok(cols.includes('category'));
-  db.prepare('INSERT INTO items(id,name,cost_cents,category,active,updated_at) VALUES(?,?,?,?,?,?)').run('item_1', 'Flashlight', 250, 'Camping', 1, new Date().toISOString());
+  db.prepare('INSERT INTO items(id,name,cost_cents,category,active,updated_at) VALUES(?,?,?,?,?,?)').run('item_1', 'Flashlight', 250, 'Camping', 1, now());
   const item = db.prepare('SELECT name,cost_cents,category,active FROM items WHERE id=?').get('item_1');
   assert.deepEqual(item, { name: 'Flashlight', cost_cents: 250, category: 'Camping', active: 1 });
 });
@@ -83,7 +84,7 @@ test('roster importer detects UltraCamp exports and reconciles cabins + balances
   assert.equal(parseRosterCsv(cabins).format, 'ultracamp_cabins');
 
   // Applying deposits to an existing camper adjusts current balance by the deposit delta.
-  const stamp = new Date().toISOString();
+  const stamp = now();
   db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,external_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
     .run('camper_test', 'Bryce Allred', 'Camper', 2000, 1200, 1, 'ultracamp', '1', stamp);
   const plan = reconcilePlan(parsed, { updateCabins: true, reconcileBalances: true, createNew: true });
@@ -185,7 +186,7 @@ test('page permissions, stock additions, and final owner protection', async () =
   process.env.DATABASE_PATH = dbPath; process.env.DEFAULT_OWNER_USERNAME = 'ownerp'; process.env.DEFAULT_OWNER_PASSWORD = 'secret123'; process.env.SESSION_SECRET = 'perm-secret';
   delete require.cache[require.resolve('../server')];
   const { app, db, hashPassword, userHasPermission } = require('../server');
-  const stamp = new Date().toISOString();
+  const stamp = now();
   db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('clerkp','clerkp','Clerk P','CLERK',hashPassword('secret123'),1,stamp,stamp);
   db.prepare('INSERT INTO items(id,name,cost_cents,category,active,sku,stock_qty,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('stock_item','Socks',500,'Clothes',1,'SOCK',8,stamp);
   const server = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); });
@@ -241,7 +242,7 @@ test('account ledger records sales, adjustments, people creation, direct-edit pr
     const zeroId = (await r.json()).id;
     assert.equal(db.prepare('SELECT count(*) c FROM account_ledger WHERE camper_id=?').get(zeroId).c, 0);
 
-    db.prepare('INSERT INTO items(id,name,cost_cents,category,active,stock_qty,updated_at) VALUES(?,?,?,?,?,?,?)').run('snack_ledger', 'Snack Ledger', 125, 'Food', 1, 10, new Date().toISOString());
+    db.prepare('INSERT INTO items(id,name,cost_cents,category,active,stock_qty,updated_at) VALUES(?,?,?,?,?,?,?)').run('snack_ledger', 'Snack Ledger', 125, 'Food', 1, 10, now());
     r = await req('POST', '/api/sale', { camperId, cart: [{ id: 'snack_ledger', qty: 2 }] }, cookie);
     assert.equal(r.status, 200);
     const txid = (await r.json()).id;
@@ -298,7 +299,7 @@ test('ledger insert failures roll back sale and adjustment side effects', async 
   process.env.DATABASE_PATH = dbPath; process.env.DEFAULT_OWNER_USERNAME = 'ownerr'; process.env.DEFAULT_OWNER_PASSWORD = 'secret123'; process.env.SESSION_SECRET = 'rollback-secret';
   delete require.cache[require.resolve('../server')];
   const { app, db } = require('../server');
-  const stamp = new Date().toISOString();
+  const stamp = now();
   db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('roll_camper','Roll Camper','Camper',1000,1000,1,'manual',stamp);
   db.prepare('INSERT INTO items(id,name,cost_cents,category,active,stock_qty,updated_at) VALUES(?,?,?,?,?,?,?)').run('roll_item','Roll Item',200,'Food',1,5,stamp);
   const server = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); });
@@ -424,7 +425,7 @@ test('cash account deposits credit amount, calculate change, store cash details,
   process.env.SESSION_SECRET = 'cash-secret';
   delete require.cache[require.resolve('../server')];
   const { app, db, hashPassword } = require('../server');
-  const stamp = new Date().toISOString();
+  const stamp = now();
   db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('cashclerk','cashclerk','Cash Clerk','CLERK',hashPassword('secret123'),1,stamp,stamp);
   db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,cabin,updated_at) VALUES(?,?,?,?,?,?,?,?,?)').run('cash_camper','Caleb Cash','Camper',1000,1000,1,'manual','Coyote',stamp);
   const server = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); });
@@ -483,7 +484,7 @@ test('cash deposit endpoint rejects users without clerk permission', async () =>
   const os = require('node:os'); const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'campstore-cash-unauth-')), 'test.sqlite');
   process.env.DATABASE_PATH = dbPath; process.env.DEFAULT_OWNER_USERNAME = 'cashowner2'; process.env.DEFAULT_OWNER_PASSWORD = 'secret123'; process.env.SESSION_SECRET = 'cash-secret-2';
   delete require.cache[require.resolve('../server')];
-  const { app, db, hashPassword } = require('../server'); const stamp = new Date().toISOString();
+  const { app, db, hashPassword } = require('../server'); const stamp = now();
   db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('nopage','nopage','No Page','CLERK',hashPassword('secret123'),1,stamp,stamp);
   db.prepare('INSERT INTO user_page_permissions(user_id,permission_key,allowed,created_at,updated_at) VALUES(?,?,?,?,?)').run('nopage','page.clerk',0,stamp,stamp);
   db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('p','No Perm','Camper',0,0,1,'manual',stamp);
@@ -498,7 +499,7 @@ test('cash box permissions, summary, corrections, adjustments, and session activ
   process.env.DATABASE_PATH = dbPath; process.env.DEFAULT_OWNER_USERNAME = 'boxowner'; process.env.DEFAULT_OWNER_PASSWORD = 'secret123'; process.env.SESSION_SECRET = 'box-secret';
   delete require.cache[require.resolve('../server')];
   const { app, db, hashPassword } = require('../server');
-  const stamp = new Date().toISOString();
+  const stamp = now();
   db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('admin','admin','Admin User','ADMIN',hashPassword('secret123'),1,stamp,stamp);
   db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('clerk','clerk','Clerk User','CLERK',hashPassword('secret123'),1,stamp,stamp);
   db.prepare('INSERT INTO user_page_permissions(user_id,permission_key,allowed,created_at,updated_at) VALUES(?,?,?,?,?)').run('clerk','page.cash_box',1,stamp,stamp);
@@ -564,8 +565,8 @@ test('cash sales use no camper ledger, reduce stock once, and update cash box to
   delete require.cache[require.resolve('../server')];
   const { db, createSale, openCashBox, cashBoxCurrent } = require('../server');
   const user = { id:null, displayName:'Clerk One', role:'CLERK' };
-  db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('real_camper','Real Camper','Camper',5000,5000,1,'manual',new Date().toISOString());
-  db.prepare('INSERT INTO items(id,name,cost_cents,category,active,stock_qty,updated_at) VALUES(?,?,?,?,?,?,?)').run('snack','Snack',700,'Food',1,5,new Date().toISOString());
+  db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('real_camper','Real Camper','Camper',5000,5000,1,'manual',now());
+  db.prepare('INSERT INTO items(id,name,cost_cents,category,active,stock_qty,updated_at) VALUES(?,?,?,?,?,?,?)').run('snack','Snack',700,'Food',1,5,now());
   assert.throws(() => createSale({ saleType:'cash', cart:[{id:'snack',qty:1}], cashReceivedCents:1000, user }), /cash box must be opened/i);
   openCashBox({ openingAmountCents:10000, user:{...user, role:'ADMIN'}, notes:'start' });
   const result = createSale({ saleType:'cash', cart:[{id:'snack',qty:1}], cashReceivedCents:1000, clientRequestId:'cash-sale-1', user });
@@ -735,4 +736,10 @@ test('cash deposit success modal uses reusable delegated close handlers', () => 
   assert.match(appSource, /cashModal'\)\.addEventListener\('click'/);
   assert.ok(submitSuccess, 'successful deposit must clear the submitting flag before showing result actions');
   assert.doesNotMatch(cashWorkflow, /\b(?:window\.)?(?:confirm|alert|prompt)\s*\(/);
+});
+
+test('Central Time utility formats display values and business day boundaries', () => {
+  assert.equal(formatDateTime('2026-07-19T06:22:32.625Z'), 'Jul 19, 2026, 1:22 AM');
+  assert.equal(getBusinessDateKey('2026-07-19T04:59:59.999Z'), '2026-07-18');
+  assert.equal(getBusinessDateKey('2026-07-19T05:00:00.000Z'), '2026-07-19');
 });

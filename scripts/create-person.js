@@ -4,7 +4,7 @@ const { db } = require('../server');
 const { randomUUID } = require('crypto');
 const nanoid = () => randomUUID().replace(/-/g, '').slice(0, 21);
 function cents(v){const s=String(v||'').replace(/[$,]/g,'').trim(); if(!s) throw Error('missing money value'); const n=Number(s); if(Number.isNaN(n)) throw Error('invalid money value '+v); return Math.round(n*100)}
-function now(){return new Date().toISOString()}
+const { now } = require('../datetime');
 const name = process.argv[2];
 const balance = process.argv[3];
 const type = process.argv[4] || 'Camper';
