@@ -414,3 +414,78 @@ test('People active checkbox saves immediately and rolls back failures without c
   assert.doesNotMatch(fn, /initial_balance|current_balance/);
 });
 
+
+test('cash account deposits credit amount, calculate change, store cash details, and are idempotent', async () => {
+  const os = require('node:os');
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'campstore-cash-')), 'test.sqlite');
+  process.env.DATABASE_PATH = dbPath;
+  process.env.DEFAULT_OWNER_USERNAME = 'cashowner';
+  process.env.DEFAULT_OWNER_PASSWORD = 'secret123';
+  process.env.SESSION_SECRET = 'cash-secret';
+  delete require.cache[require.resolve('../server')];
+  const { app, db, hashPassword } = require('../server');
+  const stamp = new Date().toISOString();
+  db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('cashclerk','cashclerk','Cash Clerk','CLERK',hashPassword('secret123'),1,stamp,stamp);
+  db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,cabin,updated_at) VALUES(?,?,?,?,?,?,?,?,?)').run('cash_camper','Caleb Cash','Camper',1000,1000,1,'manual','Coyote',stamp);
+  const server = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = async username => (await fetch(`${base}/api/login`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username,password:'secret123'}) })).headers.get('set-cookie').split(';')[0];
+  try {
+    const cookie = await login('cashclerk');
+    const post = body => fetch(`${base}/api/cash-deposits`, { method:'POST', headers:{'Content-Type':'application/json', cookie}, body:JSON.stringify(body) });
+    let r = await post({ camper_id:'cash_camper', amount_added_cents:1500, cash_received_cents:2000, reason:'snack money', client_request_id:'req-1' });
+    assert.equal(r.status, 200);
+    const d = await r.json();
+    assert.equal(d.change_owed_cents, 500);
+    assert.equal(d.previous_balance_cents, 1000);
+    assert.equal(d.new_balance_cents, 2500);
+    assert.equal(db.prepare('SELECT current_balance_cents FROM campers WHERE id=?').get('cash_camper').current_balance_cents, 2500);
+    const ledger = db.prepare('SELECT * FROM account_ledger WHERE id=?').get(d.ledger_id);
+    assert.equal(ledger.amount_cents, 1500);
+    assert.equal(ledger.payment_method, 'cash');
+    const cash = db.prepare('SELECT * FROM cash_events WHERE account_ledger_id=?').get(d.ledger_id);
+    assert.equal(cash.amount_credited_cents, 1500);
+    assert.equal(cash.cash_received_cents, 2000);
+    assert.equal(cash.change_given_cents, 500);
+    r = await post({ camper_id:'cash_camper', amount_added_cents:1500, cash_received_cents:2000, client_request_id:'req-1' });
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).duplicate, true);
+    assert.equal(db.prepare('SELECT count(*) c FROM cash_events').get().c, 1);
+    r = await post({ camper_id:'cash_camper', amount_added_cents:700, cash_received_cents:700, client_request_id:'req-2' });
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).change_owed_cents, 0);
+    for (const body of [
+      { camper_id:'cash_camper', amount_added_cents:1500, cash_received_cents:1000 },
+      { camper_id:'cash_camper', amount_added_cents:0, cash_received_cents:0 },
+      { camper_id:'cash_camper', amount_added_cents:-1, cash_received_cents:100 },
+      { camper_id:'missing', amount_added_cents:100, cash_received_cents:100 },
+      { camper_id:'cash_camper', amount_added_cents:1.5, cash_received_cents:100 }
+    ]) assert.notEqual((await post(body)).status, 200);
+    const beforeAtomic = db.prepare('SELECT current_balance_cents balance,(SELECT count(*) FROM account_ledger) ledgers,(SELECT count(*) FROM cash_events) cashes FROM campers WHERE id=?').get('cash_camper');
+    db.exec("CREATE TRIGGER fail_cash_ledger BEFORE INSERT ON account_ledger WHEN NEW.metadata_json LIKE '%cash_deposit%' BEGIN SELECT RAISE(ABORT, 'forced ledger failure'); END;");
+    r = await post({ camper_id:'cash_camper', amount_added_cents:100, cash_received_cents:100, client_request_id:'req-ledger-fail' });
+    assert.notEqual(r.status, 200);
+    db.exec('DROP TRIGGER fail_cash_ledger');
+    assert.deepEqual(db.prepare('SELECT current_balance_cents balance,(SELECT count(*) FROM account_ledger) ledgers,(SELECT count(*) FROM cash_events) cashes FROM campers WHERE id=?').get('cash_camper'), beforeAtomic);
+    db.exec("CREATE TRIGGER fail_cash_event BEFORE INSERT ON cash_events BEGIN SELECT RAISE(ABORT, 'forced cash event failure'); END;");
+    r = await post({ camper_id:'cash_camper', amount_added_cents:100, cash_received_cents:100, client_request_id:'req-event-fail' });
+    assert.notEqual(r.status, 200);
+    db.exec('DROP TRIGGER fail_cash_event');
+    assert.deepEqual(db.prepare('SELECT current_balance_cents balance,(SELECT count(*) FROM account_ledger) ledgers,(SELECT count(*) FROM cash_events) cashes FROM campers WHERE id=?').get('cash_camper'), beforeAtomic);
+    const hist = await (await fetch(`${base}/api/campers/cash_camper/history`, { headers:{ cookie: await login('cashowner') } })).json();
+    assert.ok(hist.entries.some(e => e.display_label === 'Cash added to account' && e.cash_event.cash_received_cents === 2000 && e.cash_event.change_given_cents === 500));
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('cash deposit endpoint rejects users without clerk permission', async () => {
+  const os = require('node:os'); const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'campstore-cash-unauth-')), 'test.sqlite');
+  process.env.DATABASE_PATH = dbPath; process.env.DEFAULT_OWNER_USERNAME = 'cashowner2'; process.env.DEFAULT_OWNER_PASSWORD = 'secret123'; process.env.SESSION_SECRET = 'cash-secret-2';
+  delete require.cache[require.resolve('../server')];
+  const { app, db, hashPassword } = require('../server'); const stamp = new Date().toISOString();
+  db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('nopage','nopage','No Page','CLERK',hashPassword('secret123'),1,stamp,stamp);
+  db.prepare('INSERT INTO user_page_permissions(user_id,permission_key,allowed,created_at,updated_at) VALUES(?,?,?,?,?)').run('nopage','page.clerk',0,stamp,stamp);
+  db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('p','No Perm','Camper',0,0,1,'manual',stamp);
+  const server = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); }); const base = `http://127.0.0.1:${server.address().port}`;
+  try { const login = await fetch(`${base}/api/login`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:'nopage',password:'secret123'}) }); const cookie = login.headers.get('set-cookie').split(';')[0]; const r = await fetch(`${base}/api/cash-deposits`, { method:'POST', headers:{'Content-Type':'application/json', cookie}, body:JSON.stringify({camper_id:'p',amount_added_cents:100,cash_received_cents:100}) }); assert.equal(r.status, 403); }
+  finally { await new Promise(resolve => server.close(resolve)); }
+});
