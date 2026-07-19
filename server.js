@@ -11,6 +11,9 @@ const { now, currentMillis, formatDateTime, getBusinessToday, isBusinessDate, fi
 const APP_VERSION = process.env.APP_VERSION || readCommit() || 'dev';
 const DB_PATH = process.env.DATABASE_PATH || './data/campstore.sqlite';
 const SESSION_SECRET = process.env.SESSION_SECRET || process.env.DEFAULT_OWNER_PASSWORD || 'campstore-dev-session-secret';
+const SESSION_COOKIE_NAME = 'campstore_session';
+const SESSION_COOKIE_OPTIONS = { httpOnly: true, sameSite: 'lax', secure: process.env.COOKIE_SECURE === 'true' };
+const SESSION_COOKIE_MAX_AGE = 1000 * 60 * 60 * 12;
 const ROLES = { OWNER: 3, ADMIN: 2, CLERK: 1 };
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
@@ -31,7 +34,8 @@ function migrate(){
  CREATE TABLE IF NOT EXISTS audit_logs(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,admin TEXT,action TEXT NOT NULL,person_id TEXT,person_name TEXT,initial_balance_cents INTEGER,current_balance_cents INTEGER,details_json TEXT);
  CREATE TABLE IF NOT EXISTS account_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT,camper_id TEXT NOT NULL,entry_type TEXT NOT NULL,amount_cents INTEGER NOT NULL,balance_before_cents INTEGER NOT NULL,balance_after_cents INTEGER NOT NULL,payment_method TEXT,reason TEXT,transaction_id TEXT,balance_adjustment_id TEXT,audit_log_id TEXT,created_by_user_id TEXT,created_by_name TEXT,created_at TEXT NOT NULL,metadata_json TEXT,FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(transaction_id) REFERENCES transactions(id),FOREIGN KEY(balance_adjustment_id) REFERENCES balance_adjustments(id),FOREIGN KEY(audit_log_id) REFERENCES audit_logs(id),FOREIGN KEY(created_by_user_id) REFERENCES users(id));
  CREATE TABLE IF NOT EXISTS cash_events(id TEXT PRIMARY KEY,account_ledger_id INTEGER,camper_id TEXT,event_type TEXT NOT NULL,amount_credited_cents INTEGER NOT NULL DEFAULT 0,cash_received_cents INTEGER NOT NULL,change_given_cents INTEGER NOT NULL,reason TEXT,created_by_user_id TEXT,created_by_name TEXT,created_at TEXT NOT NULL,client_request_id TEXT UNIQUE,cash_box_session_id INTEGER,transaction_id TEXT,sale_total_cents INTEGER NOT NULL DEFAULT 0,net_drawer_change_cents INTEGER NOT NULL DEFAULT 0,FOREIGN KEY(account_ledger_id) REFERENCES account_ledger(id),FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(created_by_user_id) REFERENCES users(id),FOREIGN KEY(cash_box_session_id) REFERENCES cash_box_sessions(id),FOREIGN KEY(transaction_id) REFERENCES transactions(id));
- CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,username TEXT NOT NULL UNIQUE,display_name TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('OWNER','ADMIN','CLERK')),password_hash TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);`);
+ CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,username TEXT NOT NULL UNIQUE,display_name TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('OWNER','ADMIN','CLERK')),password_hash TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS auth_sessions(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,created_at TEXT NOT NULL,expires_at INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 1,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);`);
 
  // Existing databases may have older tables. Add columns before any SQL below
  // references them (especially items.category in the category index/status queries).
@@ -219,9 +223,10 @@ function seedDefaultOwner(){const existingCount=db.prepare('SELECT count(*) c FR
 function hashPassword(password){const salt=randomBytes(16).toString('hex'); const hash=scryptSync(password,salt,64).toString('hex'); return `scrypt$${salt}$${hash}`}
 function verifyPassword(password,stored){const [scheme,salt,hash]=String(stored||'').split('$'); if(scheme!=='scrypt'||!salt||!hash) return false; const actual=Buffer.from(hash,'hex'); const check=scryptSync(password,salt,64); return actual.length===check.length && timingSafeEqual(actual,check)}
 function sign(value){return createHmac('sha256',SESSION_SECRET).update(value).digest('base64url')}
-function makeSession(user){const payload=Buffer.from(JSON.stringify({id:user.id,username:user.username,displayName:user.display_name,role:user.role,exp:currentMillis()+1000*60*60*12})).toString('base64url'); return `${payload}.${sign(payload)}`}
+function makeSession(user){const sid='sess_'+nanoid(); const exp=currentMillis()+SESSION_COOKIE_MAX_AGE; db.prepare('INSERT INTO auth_sessions(id,user_id,created_at,expires_at,active) VALUES(?,?,?,?,1)').run(sid,user.id,now(),exp); const payload=Buffer.from(JSON.stringify({sid,id:user.id,username:user.username,displayName:user.display_name,role:user.role,exp})).toString('base64url'); return `${payload}.${sign(payload)}`}
+function invalidateSession(req){const token=parseCookies(req)[SESSION_COOKIE_NAME]; if(!token) return; const [payload,sig]=token.split('.'); if(!payload||sig!==sign(payload)) return; try{const data=JSON.parse(Buffer.from(payload,'base64url').toString()); if(data.sid) db.prepare('UPDATE auth_sessions SET active=0 WHERE id=?').run(data.sid)}catch{}}
 function parseCookies(req){return Object.fromEntries(String(req.headers.cookie||'').split(';').filter(Boolean).map(p=>{const i=p.indexOf('='); return [p.slice(0,i).trim(),decodeURIComponent(p.slice(i+1))]}))}
-function currentUser(req){const token=parseCookies(req).campstore_session; if(!token) return null; const [payload,sig]=token.split('.'); if(!payload||sig!==sign(payload)) return null; try{const data=JSON.parse(Buffer.from(payload,'base64url').toString()); if(data.exp<currentMillis()) return null; const user=db.prepare('SELECT id,username,display_name,role,active FROM users WHERE id=? AND active=1').get(data.id); return user?{id:user.id,username:user.username,displayName:user.display_name,role:user.role}:null}catch{return null}}
+function currentUser(req){const token=parseCookies(req)[SESSION_COOKIE_NAME]; if(!token) return null; const [payload,sig]=token.split('.'); if(!payload||sig!==sign(payload)) return null; try{const data=JSON.parse(Buffer.from(payload,'base64url').toString()); if(data.exp<currentMillis()) return null; if(!data.sid) return null; const session=db.prepare('SELECT active,expires_at FROM auth_sessions WHERE id=? AND user_id=?').get(data.sid,data.id); if(!session||!session.active||session.expires_at<currentMillis()) return null; const user=db.prepare('SELECT id,username,display_name,role,active FROM users WHERE id=? AND active=1').get(data.id); return user?{id:user.id,username:user.username,displayName:user.display_name,role:user.role}:null}catch{return null}}
 
 const PAGE_REGISTRY = [
  {key:'page.clerk',slug:'clerk',label:'Clerk',route:'/clerk',file:'index.html'},
@@ -413,13 +418,14 @@ function buildHistoryEntry(row){const metadata=parseJsonSafe(row.metadata_json,n
 function event(type,status,message){db.prepare('INSERT INTO sync_events(created_at,type,status,message) VALUES(?,?,?,?)').run(now(),type,status,message||'')}
 app.get('/login.html',(req,res)=>res.sendFile(path.join(__dirname,'public','login.html')));
 app.get('/login',(req,res)=>res.redirect('/login.html'));
-app.post('/api/login',(req,res)=>{const {username,password}=req.body||{}; const user=db.prepare('SELECT * FROM users WHERE username=? AND active=1').get(String(username||'')); if(!user||!verifyPassword(String(password||''),user.password_hash)) return res.status(401).json({error:'Invalid username or password'}); res.cookie('campstore_session',makeSession(user),{httpOnly:true,sameSite:'lax',secure:process.env.COOKIE_SECURE==='true',maxAge:1000*60*60*12}); const first=allowedPages({id:user.id,role:user.role})[0]?.route||'/access-denied'; res.json({ok:true,redirect:first,user:{username:user.username,displayName:user.display_name,role:user.role}})});
-app.post('/api/logout',(req,res)=>{res.clearCookie('campstore_session'); res.json({ok:true})});
+function noStore(req,res,next){res.set('Cache-Control','no-store'); res.set('Pragma','no-cache'); next()}
+app.post('/api/login',(req,res)=>{const {username,password}=req.body||{}; const user=db.prepare('SELECT * FROM users WHERE username=? AND active=1').get(String(username||'')); if(!user||!verifyPassword(String(password||''),user.password_hash)) return res.status(401).json({error:'Invalid username or password'}); res.cookie(SESSION_COOKIE_NAME,makeSession(user),{...SESSION_COOKIE_OPTIONS,maxAge:SESSION_COOKIE_MAX_AGE}); const first=allowedPages({id:user.id,role:user.role})[0]?.route||'/access-denied'; res.json({ok:true,redirect:first,user:{username:user.username,displayName:user.display_name,role:user.role}})});
+app.post('/api/logout',(req,res)=>{invalidateSession(req); res.clearCookie(SESSION_COOKIE_NAME,SESSION_COOKIE_OPTIONS); res.set('Clear-Site-Data','\"cache\", \"storage\"'); res.json({ok:true})});
 app.get('/api/me',requireAuth,(req,res)=>res.json({user:req.user,pages:PAGE_REGISTRY,permissions:getEffectivePermissions(req.user),allowedPages:allowedPages(req.user)}));
 app.get('/',requireAuth,(req,res)=>{const first=allowedPages(req.user)[0]; return first?res.redirect(first.route):res.redirect('/access-denied')});
-app.get('/access-denied',requireAuth,(req,res)=>res.sendFile(path.join(__dirname,'public','403.html')));
-for(const page of PAGE_REGISTRY){app.get(page.route,requireAuth,requirePermission(page.key),(req,res)=>res.sendFile(path.join(__dirname,'public',page.file)))}
-app.get('/people/:id/history',requireAuth,requirePermission('page.people'),(req,res)=>res.sendFile(path.join(__dirname,'public','admin.html')));
+app.get('/access-denied',requireAuth,noStore,(req,res)=>res.sendFile(path.join(__dirname,'public','403.html')));
+for(const page of PAGE_REGISTRY){app.get(page.route,requireAuth,requirePermission(page.key),noStore,(req,res)=>res.sendFile(path.join(__dirname,'public',page.file)))}
+app.get('/people/:id/history',requireAuth,requirePermission('page.people'),noStore,(req,res)=>res.sendFile(path.join(__dirname,'public','admin.html')));
 app.get('/index.html',requireAuth,requirePermission('page.clerk'),(req,res)=>res.redirect('/clerk'));
 app.get('/admin.html',requireAuth,requireAnyPermission(['page.admin','page.people','page.items','page.transactions','page.sync','page.users','page.settings']),(req,res)=>res.redirect('/admin'));
 app.use(express.static(path.join(__dirname, 'public'), { index: false }));

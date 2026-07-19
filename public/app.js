@@ -2,10 +2,6 @@ let state = {}, selected = null, cart = [], selectedCategory = null, saleCamperI
 const $ = id => document.getElementById(id), fmt = c => '$' + (c / 100).toFixed(2);
 const {formatDateTime,currentMillis}=CampDateTime;
 
-async function logout() {
-  await fetch('/api/logout', { method: 'POST' });
-  location.href = '/login.html';
-}
 
 function esc(s) {
   return String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -368,7 +364,7 @@ $('itemSearch').oninput = () => {
 };
 $('checkout').onclick = checkout;
 $('clear').onclick = clearCart;
-$('logout').onclick = logout;
+CampAuth.initLogoutButton();
 $('addCamperBtn').onclick = () => toggleQuickAdd();
 $('qaCancel').onclick = () => toggleQuickAdd(false);
 $('quickAddForm').onsubmit = quickAddCamper;

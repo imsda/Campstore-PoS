@@ -30,6 +30,17 @@ test('login creates a session and protected routes require it', async () => {
     assert.equal(authed.status, 200);
     const state = await authed.json();
     assert.equal(state.user.role, 'OWNER');
+    const page = await fetch(`${base}/clerk`, { headers: { cookie, accept: 'text/html' }, redirect: 'manual' });
+    assert.equal(page.status, 200);
+    assert.equal(page.headers.get('cache-control'), 'no-store');
+    const logout = await fetch(`${base}/api/logout`, { method: 'POST', headers: { cookie } });
+    assert.equal(logout.status, 200);
+    assert.match(logout.headers.get('set-cookie'), /campstore_session=;/);
+    const afterLogout = await fetch(`${base}/api/state`, { headers: { cookie } });
+    assert.equal(afterLogout.status, 401);
+    const pageAfterLogout = await fetch(`${base}/clerk`, { headers: { cookie, accept: 'text/html' }, redirect: 'manual' });
+    assert.equal(pageAfterLogout.status, 302);
+    assert.equal(pageAfterLogout.headers.get('location'), '/login.html');
   } finally {
     await new Promise(resolve => server.close(resolve));
   }
