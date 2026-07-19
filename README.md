@@ -286,3 +286,65 @@ The people importer rejects duplicate child names and camper balance errors. The
 - Pending Google Sync transactions remain after sync: inspect Admin status events and transaction errors.
 - Incorrect camper balance in Sheets: local transactions are authoritative; run Push Pending Google Sync transactions, then verify the camper row in `Campers / Balances`.
 - Import caution: importing does not intentionally overwrite local unsynced transaction logs. Perform Pending Google Sync before a new operating day import when possible.
+
+## Routed pages and page permissions
+
+Campstore-PoS now uses real routes for each major page instead of dashboard hash-only tabs. Supported routes are:
+
+- `/clerk` — cashier checkout page
+- `/stock` — manual stock additions
+- `/people` — people/camper management and reconciliation
+- `/items` — item and inventory administration
+- `/transactions` — transaction and balance-adjustment history
+- `/sync` — Google import/sync controls
+- `/users` — user management and page access
+- `/settings` — Google Sheets and application settings
+- `/admin` — operational dashboard/status
+
+Unauthenticated users are redirected to login. Authenticated users are redirected from `/` to their first permitted page. A user with no permitted pages sees an access-denied page and can log out.
+
+Page access is controlled by central permission keys: `page.clerk`, `page.stock`, `page.people`, `page.items`, `page.transactions`, `page.sync`, `page.users`, `page.settings`, and `page.admin`. Navigation only shows pages the signed-in user may access, and server-side middleware protects the page routes and related APIs so hidden links are not the security boundary.
+
+Default role access is:
+
+- `OWNER`: all pages, always. Owner page access cannot be overridden to lock an owner out.
+- `ADMIN`: all pages by role default.
+- `CLERK`: Clerk only by role default.
+
+Owners and users with user-management page access can open `/users` to manage per-user page access. Each page permission can inherit the role default, be explicitly allowed, or be explicitly denied. Explicit user settings override role defaults except for `OWNER`, which always retains all pages. The app also prevents disabling the final active `OWNER` account.
+
+## Stock page and audit trail
+
+The `/stock` page lists item name, category, SKU, current stock, active/inactive status, and recent stock-update timing. It provides a prominent `+1` action and an `Add Custom` action. Custom stock additions must be positive whole numbers greater than zero. The page does not provide minus buttons, editable stock fields, or any way to set an absolute lower value.
+
+The protected stock-add API is:
+
+```http
+POST /api/stock/:itemId/add
+Content-Type: application/json
+
+{ "quantity": 1 }
+```
+
+The endpoint requires authentication and `page.stock`, validates the item and quantity, rejects zero, negatives, decimals, and invalid strings, and atomically increments `stock_qty`. It never accepts a replacement total. Successful additions are written to `stock_adjustments` with a positive `quantity_change`, resulting quantity, `manual_add` adjustment type, default reason, authenticated user, and timestamp. Existing checkout behavior may still subtract stock when a sale is completed.
+
+## Database migrations
+
+`npm run setup` and application startup run idempotent SQLite migrations. New tables are created only if missing:
+
+- `user_page_permissions` for per-user page access overrides
+- `stock_adjustments` for manual stock-add audit records
+
+Existing users, people/campers, items, stock values, and transactions are preserved. Existing users automatically receive effective permissions from their role defaults unless a custom page override is added.
+
+## Deployment
+
+The existing deployment flow remains unchanged and does not require a frontend build:
+
+```bash
+npm install
+npm run setup
+sudo systemctl restart campstore-pos
+```
+
+No new environment variables are required.

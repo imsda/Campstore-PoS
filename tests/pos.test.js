@@ -178,3 +178,42 @@ test('migration upgrades older items table before category is referenced', () =>
   const categoryStatus = db.prepare('SELECT category,count(*) c FROM items WHERE active=1 GROUP BY category ORDER BY category').all();
   assert.deepEqual(categoryStatus, [{ category: 'Uncategorized', c: 1 }]);
 });
+
+test('page permissions, stock additions, and final owner protection', async () => {
+  const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'campstore-pages-')), 'test.sqlite');
+  process.env.DATABASE_PATH = dbPath; process.env.DEFAULT_OWNER_USERNAME = 'ownerp'; process.env.DEFAULT_OWNER_PASSWORD = 'secret123'; process.env.SESSION_SECRET = 'perm-secret';
+  delete require.cache[require.resolve('../server')];
+  const { app, db, hashPassword, userHasPermission } = require('../server');
+  const stamp = new Date().toISOString();
+  db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('clerkp','clerkp','Clerk P','CLERK',hashPassword('secret123'),1,stamp,stamp);
+  db.prepare('INSERT INTO items(id,name,cost_cents,category,active,sku,stock_qty,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('stock_item','Socks',500,'Clothes',1,'SOCK',8,stamp);
+  const server = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = async (username) => (await fetch(`${base}/api/login`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username,password:'secret123'}) })).headers.get('set-cookie').split(';')[0];
+  try {
+    const ownerCookie = await login('ownerp');
+    const clerkCookie = await login('clerkp');
+    assert.equal((await fetch(`${base}/stock`, { headers:{ cookie:clerkCookie } })).status, 403);
+    assert.equal(userHasPermission({id:'clerkp',role:'CLERK'}, 'page.clerk'), true);
+    assert.equal(userHasPermission({id:'clerkp',role:'CLERK'}, 'page.stock'), false);
+    db.prepare('INSERT INTO user_page_permissions(user_id,permission_key,allowed,created_at,updated_at) VALUES(?,?,?,?,?)').run('clerkp','page.stock',1,stamp,stamp);
+    assert.equal((await fetch(`${base}/stock`, { headers:{ cookie:clerkCookie } })).status, 200);
+    let r = await fetch(`${base}/api/stock/stock_item/add`, { method:'POST', headers:{'Content-Type':'application/json', cookie:clerkCookie}, body:JSON.stringify({quantity:1}) });
+    assert.equal(r.status, 200); assert.equal((await r.json()).stock_qty, 9);
+    r = await fetch(`${base}/api/stock/stock_item/add`, { method:'POST', headers:{'Content-Type':'application/json', cookie:clerkCookie}, body:JSON.stringify({quantity:12}) });
+    assert.equal(r.status, 200); assert.equal((await r.json()).stock_qty, 21);
+    for (const quantity of [0, -1, 1.5, 'abc']) {
+      r = await fetch(`${base}/api/stock/stock_item/add`, { method:'POST', headers:{'Content-Type':'application/json', cookie:clerkCookie}, body:JSON.stringify({quantity}) });
+      assert.equal(r.status, 400);
+    }
+    r = await fetch(`${base}/api/stock/missing/add`, { method:'POST', headers:{'Content-Type':'application/json', cookie:clerkCookie}, body:JSON.stringify({quantity:1}) });
+    assert.equal(r.status, 404);
+    assert.equal(db.prepare('SELECT count(*) c FROM stock_adjustments WHERE item_id=?').get('stock_item').c, 2);
+    db.prepare('INSERT INTO user_page_permissions(user_id,permission_key,allowed,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id,permission_key) DO UPDATE SET allowed=excluded.allowed').run('clerkp','page.stock',0,stamp,stamp);
+    r = await fetch(`${base}/api/stock/stock_item/add`, { method:'POST', headers:{'Content-Type':'application/json', cookie:clerkCookie}, body:JSON.stringify({quantity:1}) });
+    assert.equal(r.status, 403);
+    r = await fetch(`${base}/api/users/${db.prepare("SELECT id FROM users WHERE username='ownerp'").get().id}/status`, { method:'POST', headers:{'Content-Type':'application/json', cookie:ownerCookie}, body:JSON.stringify({active:false}) });
+    assert.equal(r.status, 400);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});

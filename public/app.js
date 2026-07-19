@@ -24,6 +24,11 @@ function toast(type, title, lines = []) {
   }, 2000);
 }
 
+function renderNav(pages) {
+  const nav = $('nav'); if (!nav || nav.dataset.ready) return; nav.dataset.ready = '1';
+  nav.innerHTML = pages.map(p => `<a class="${location.pathname===p.route?'active':''}" href="${p.route}">${esc(p.label)}</a>`).join('') + nav.innerHTML;
+}
+
 function resetSaleWorkflow() {
   cart = [];
   selected = null;
@@ -49,7 +54,7 @@ async function load() {
   state = await r.json();
   $('sync').textContent = `Pending Google Sync: ${state.pendingGoogleSync ?? state.pending} Transactions`;
   $('userBadge').textContent = `${state.user.displayName} · ${state.user.role}`;
-  if (state.user.role === 'CLERK') $('adminLink').style.display = 'none';
+  if (state.allowedPages) renderNav(state.allowedPages);
   if (selected) selected = state.campers.find(c => c.id === selected.id) || selected;
   renderCabins();
   renderCampers();
