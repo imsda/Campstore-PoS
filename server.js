@@ -46,6 +46,7 @@ function migrate(){
  ensureColumn('campers','external_id',"TEXT");
  ensureColumn('items','stock_qty',"INTEGER");
  ensureColumn('users','active',"INTEGER NOT NULL DEFAULT 1");
+ db.exec(`CREATE TABLE IF NOT EXISTS cash_box_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,opening_amount_cents INTEGER NOT NULL CHECK(opening_amount_cents >= 0),opened_at TEXT NOT NULL,opened_by_user_id TEXT,opened_by_name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','closed')),closed_at TEXT,closed_by_user_id TEXT,closed_by_name TEXT,notes TEXT,FOREIGN KEY(opened_by_user_id) REFERENCES users(id),FOREIGN KEY(closed_by_user_id) REFERENCES users(id));`);
  ensureNullableTransactionsAndCashEvents();
  ensureColumn('transactions','sale_type',"TEXT NOT NULL DEFAULT 'account'");
  ensureColumn('transactions','payment_method',"TEXT NOT NULL DEFAULT 'account'");
@@ -83,11 +84,78 @@ function migrate(){
  ensureItemsNameCategoryIndex();
  setDefault('allow_over_balance', String(process.env.ALLOW_OVER_BALANCE === 'true'));
 }
+function q(name){return '"'+String(name).replace(/"/g,'""')+'"'}
+function tableExists(name){return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name)}
+function tableInfo(table){return tableExists(table)?db.prepare(`PRAGMA table_info(${q(table)})`).all():[]}
+function foreignKeyList(table){return tableExists(table)?db.prepare(`PRAGMA foreign_key_list(${q(table)})`).all():[]}
+function indexList(table){return tableExists(table)?db.prepare(`PRAGMA index_list(${q(table)})`).all():[]}
+function columnMap(table){return Object.fromEntries(tableInfo(table).map(c=>[c.name,c]))}
+function isNullable(table,column){const c=columnMap(table)[column]; return c && !c.notnull}
+function needsNullableTransactionMigration(){return ['camper_id','camper_name','previous_balance_cents','new_balance_cents'].some(c=>columnMap('transactions')[c]?.notnull)}
+function needsNullableCashEventsMigration(){return ['account_ledger_id','camper_id','cash_box_session_id','transaction_id'].some(c=>columnMap('cash_events')[c]?.notnull)}
+function countRows(table){return tableExists(table)?db.prepare(`SELECT count(*) c FROM ${q(table)}`).get().c:0}
+function idSet(table){return db.prepare(`SELECT group_concat(id, char(10)) ids FROM (SELECT id FROM ${q(table)} ORDER BY id)`).get().ids||''}
+function assertNoForeignKeyViolations(){const rows=db.prepare('PRAGMA foreign_key_check').all(); if(rows.length) throw Error('[migration] Foreign-key validation failed: '+JSON.stringify(rows)); console.log('[migration] Foreign-key validation passed')}
+function validateNoInterruptedNullableMigration(){
+ const leftovers=['transactions_old_nullable','transactions_new','cash_events_old_nullable','cash_events_new'].filter(tableExists);
+ if(!leftovers.length) return;
+ const details=leftovers.map(t=>`${t}: rows=${countRows(t)}, columns=${tableInfo(t).map(c=>c.name).join(',')}`).join('; ');
+ throw Error(`[migration] Interrupted nullable cash-sale migration detected (${details}). Restore from backup or inspect these tables manually; refusing to guess which financial records are authoritative.`);
+}
+function createAccountLedgerTable(name){db.exec(`CREATE TABLE ${q(name)}(id INTEGER PRIMARY KEY AUTOINCREMENT,camper_id TEXT NOT NULL,entry_type TEXT NOT NULL,amount_cents INTEGER NOT NULL,balance_before_cents INTEGER NOT NULL,balance_after_cents INTEGER NOT NULL,payment_method TEXT,reason TEXT,transaction_id TEXT,balance_adjustment_id TEXT,audit_log_id TEXT,created_by_user_id TEXT,created_by_name TEXT,created_at TEXT NOT NULL,metadata_json TEXT,FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(transaction_id) REFERENCES transactions(id),FOREIGN KEY(balance_adjustment_id) REFERENCES balance_adjustments(id),FOREIGN KEY(audit_log_id) REFERENCES audit_logs(id),FOREIGN KEY(created_by_user_id) REFERENCES users(id))`)}
+function createTransactionsTable(name){db.exec(`CREATE TABLE ${q(name)}(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,clerk TEXT,camper_id TEXT,camper_name TEXT,previous_balance_cents INTEGER,total_cents INTEGER NOT NULL,new_balance_cents INTEGER,items_json TEXT NOT NULL,sync_status TEXT NOT NULL DEFAULT 'pending',synced_at TEXT,error TEXT,sale_type TEXT NOT NULL DEFAULT 'account',payment_method TEXT NOT NULL DEFAULT 'account',cash_box_session_id INTEGER,cash_received_cents INTEGER,change_given_cents INTEGER,client_request_id TEXT UNIQUE,discount_cents INTEGER NOT NULL DEFAULT 0,FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(cash_box_session_id) REFERENCES cash_box_sessions(id))`)}
+function createCashEventsTable(name){db.exec(`CREATE TABLE ${q(name)}(id TEXT PRIMARY KEY,account_ledger_id INTEGER,camper_id TEXT,event_type TEXT NOT NULL,amount_credited_cents INTEGER NOT NULL DEFAULT 0,cash_received_cents INTEGER NOT NULL,change_given_cents INTEGER NOT NULL,reason TEXT,created_by_user_id TEXT,created_by_name TEXT,created_at TEXT NOT NULL,client_request_id TEXT UNIQUE,cash_box_session_id INTEGER,transaction_id TEXT,sale_total_cents INTEGER NOT NULL DEFAULT 0,net_drawer_change_cents INTEGER NOT NULL DEFAULT 0,FOREIGN KEY(account_ledger_id) REFERENCES account_ledger(id),FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(created_by_user_id) REFERENCES users(id),FOREIGN KEY(cash_box_session_id) REFERENCES cash_box_sessions(id),FOREIGN KEY(transaction_id) REFERENCES transactions(id))`)}
+function selectExpression(source,column,def){return columnMap(source)[column]?q(column):def+' AS '+q(column)}
+function copyTable(source,target,columns,defaults){
+ const exprs=columns.map(c=>selectExpression(source,c,defaults[c]??'NULL')).join(',');
+ db.exec(`INSERT INTO ${q(target)}(${columns.map(q).join(',')}) SELECT ${exprs} FROM ${q(source)}`);
+}
+function recreateNullableIndexes(){db.exec(`CREATE INDEX IF NOT EXISTS idx_transactions_camper ON transactions(camper_id);
+ CREATE INDEX IF NOT EXISTS idx_transactions_created ON transactions(created_at);
+ CREATE INDEX IF NOT EXISTS idx_transactions_sync ON transactions(sync_status);
+ CREATE INDEX IF NOT EXISTS idx_transactions_cash_box_session ON transactions(cash_box_session_id);
+ CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_client_request_id ON transactions(client_request_id) WHERE client_request_id IS NOT NULL;
+ CREATE INDEX IF NOT EXISTS idx_cash_events_ledger ON cash_events(account_ledger_id);
+ CREATE INDEX IF NOT EXISTS idx_cash_events_camper ON cash_events(camper_id);
+ CREATE INDEX IF NOT EXISTS idx_cash_events_created ON cash_events(created_at);
+ CREATE INDEX IF NOT EXISTS idx_cash_events_transaction ON cash_events(transaction_id);
+ CREATE INDEX IF NOT EXISTS idx_cash_events_cash_box_session ON cash_events(cash_box_session_id);
+ CREATE UNIQUE INDEX IF NOT EXISTS idx_cash_events_client_request_id ON cash_events(client_request_id) WHERE client_request_id IS NOT NULL;`)}
+function validateMigrationRowCounts(before){
+ const after={transactions:countRows('transactions'),cash_events:countRows('cash_events'),account_ledger:countRows('account_ledger')};
+ for(const t of Object.keys(before.counts)) if(before.counts[t]!==after[t]) throw Error(`[migration] ${t} row count changed from ${before.counts[t]} to ${after[t]}`);
+ if(before.transactionIds!==idSet('transactions')) throw Error('[migration] Transaction IDs changed during nullable migration');
+ if(before.cashEventIds!==idSet('cash_events')) throw Error('[migration] Cash event IDs changed during nullable migration');
+ const badLedger=db.prepare('SELECT count(*) c FROM account_ledger l LEFT JOIN transactions t ON t.id=l.transaction_id WHERE l.transaction_id IS NOT NULL AND t.id IS NULL').get().c;
+ const badCash=db.prepare('SELECT count(*) c FROM cash_events ce LEFT JOIN transactions t ON t.id=ce.transaction_id WHERE ce.transaction_id IS NOT NULL AND t.id IS NULL').get().c;
+ if(badLedger||badCash) throw Error(`[migration] Unresolved transaction references after migration: account_ledger=${badLedger}, cash_events=${badCash}`);
+ console.log(`[migration] Row counts before/after: transactions ${before.counts.transactions}/${after.transactions}, cash_events ${before.counts.cash_events}/${after.cash_events}, account_ledger ${before.counts.account_ledger}/${after.account_ledger}`);
+}
 function ensureNullableTransactionsAndCashEvents(){
- const tx=db.prepare('PRAGMA table_info(transactions)').all();
- if(tx.some(c=>['camper_id','camper_name','previous_balance_cents','new_balance_cents'].includes(c.name)&&c.notnull)){db.exec(`ALTER TABLE transactions RENAME TO transactions_old_nullable; CREATE TABLE transactions(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,clerk TEXT,camper_id TEXT,camper_name TEXT,previous_balance_cents INTEGER,total_cents INTEGER NOT NULL,new_balance_cents INTEGER,items_json TEXT NOT NULL,sync_status TEXT NOT NULL DEFAULT 'pending',synced_at TEXT,error TEXT,sale_type TEXT NOT NULL DEFAULT 'account',payment_method TEXT NOT NULL DEFAULT 'account',cash_box_session_id INTEGER,cash_received_cents INTEGER,change_given_cents INTEGER,client_request_id TEXT UNIQUE,FOREIGN KEY(camper_id) REFERENCES campers(id)); INSERT INTO transactions(id,created_at,clerk,camper_id,camper_name,previous_balance_cents,total_cents,new_balance_cents,items_json,sync_status,synced_at,error) SELECT id,created_at,clerk,camper_id,camper_name,previous_balance_cents,total_cents,new_balance_cents,items_json,sync_status,synced_at,error FROM transactions_old_nullable; DROP TABLE transactions_old_nullable;`)}
- const ce=db.prepare('PRAGMA table_info(cash_events)').all();
- if(ce.some(c=>['account_ledger_id','camper_id'].includes(c.name)&&c.notnull)){db.exec(`ALTER TABLE cash_events RENAME TO cash_events_old_nullable; CREATE TABLE cash_events(id TEXT PRIMARY KEY,account_ledger_id INTEGER,camper_id TEXT,event_type TEXT NOT NULL,amount_credited_cents INTEGER NOT NULL DEFAULT 0,cash_received_cents INTEGER NOT NULL,change_given_cents INTEGER NOT NULL,reason TEXT,created_by_user_id TEXT,created_by_name TEXT,created_at TEXT NOT NULL,client_request_id TEXT UNIQUE,cash_box_session_id INTEGER,transaction_id TEXT,sale_total_cents INTEGER NOT NULL DEFAULT 0,net_drawer_change_cents INTEGER NOT NULL DEFAULT 0,FOREIGN KEY(account_ledger_id) REFERENCES account_ledger(id),FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(created_by_user_id) REFERENCES users(id),FOREIGN KEY(transaction_id) REFERENCES transactions(id)); INSERT INTO cash_events(id,account_ledger_id,camper_id,event_type,amount_credited_cents,cash_received_cents,change_given_cents,reason,created_by_user_id,created_by_name,created_at,client_request_id,cash_box_session_id) SELECT id,account_ledger_id,camper_id,event_type,amount_credited_cents,cash_received_cents,change_given_cents,reason,created_by_user_id,created_by_name,created_at,client_request_id,cash_box_session_id FROM cash_events_old_nullable; DROP TABLE cash_events_old_nullable;`)}
+ validateNoInterruptedNullableMigration();
+ const rebuildTx=needsNullableTransactionMigration();
+ const rebuildCash=needsNullableCashEventsMigration();
+ const rebuildLedger=rebuildTx;
+ if(!rebuildTx&&!rebuildCash) return;
+ console.log('[migration] Foreign-key graph for nullable cash-sale migration: account_ledger.transaction_id -> transactions.id; cash_events.transaction_id -> transactions.id; cash_events.account_ledger_id -> account_ledger.id; transactions.camper_id, cash_events.camper_id, account_ledger.camper_id -> campers.id; cash_events.created_by_user_id -> users.id; transactions.cash_box_session_id and cash_events.cash_box_session_id -> cash_box_sessions.id when present. Renaming transactions rewrites dependent FKs to transactions_old_nullable, so dropping it fails while account_ledger/cash_events reference it.');
+ const before={counts:{transactions:countRows('transactions'),cash_events:countRows('cash_events'),account_ledger:countRows('account_ledger')},transactionIds:idSet('transactions'),cashEventIds:idSet('cash_events')};
+ const originalFk=db.pragma('foreign_keys',{simple:true});
+ try{
+  db.pragma('foreign_keys = OFF');
+  const run=db.transaction(()=>{
+   if(rebuildCash){console.log('[migration] Rebuilding cash_events'); db.exec('ALTER TABLE cash_events RENAME TO cash_events_old_nullable')}
+   if(rebuildLedger){console.log('[migration] Rebuilding account_ledger to refresh transaction foreign key'); db.exec('ALTER TABLE account_ledger RENAME TO account_ledger_old_nullable')}
+   if(rebuildTx){console.log('[migration] Rebuilding transactions for nullable camper fields'); db.exec('ALTER TABLE transactions RENAME TO transactions_old_nullable')}
+   if(rebuildTx){createTransactionsTable('transactions'); copyTable('transactions_old_nullable','transactions',['id','created_at','clerk','camper_id','camper_name','previous_balance_cents','total_cents','new_balance_cents','items_json','sync_status','synced_at','error','sale_type','payment_method','cash_box_session_id','cash_received_cents','change_given_cents','client_request_id','discount_cents'],{sync_status:"'pending'",sale_type:"'account'",payment_method:"'account'",discount_cents:'0'}); console.log(`[migration] Copied ${countRows('transactions')} transactions`); db.exec('DROP TABLE transactions_old_nullable')}
+   if(rebuildLedger){createAccountLedgerTable('account_ledger'); copyTable('account_ledger_old_nullable','account_ledger',['id','camper_id','entry_type','amount_cents','balance_before_cents','balance_after_cents','payment_method','reason','transaction_id','balance_adjustment_id','audit_log_id','created_by_user_id','created_by_name','created_at','metadata_json'],{}); console.log(`[migration] Copied ${countRows('account_ledger')} account ledger rows`); db.exec('DROP TABLE account_ledger_old_nullable')}
+   if(rebuildCash){createCashEventsTable('cash_events'); copyTable('cash_events_old_nullable','cash_events',['id','account_ledger_id','camper_id','event_type','amount_credited_cents','cash_received_cents','change_given_cents','reason','created_by_user_id','created_by_name','created_at','client_request_id','cash_box_session_id','transaction_id','sale_total_cents','net_drawer_change_cents'],{amount_credited_cents:'0',sale_total_cents:'0',net_drawer_change_cents:'0'}); console.log(`[migration] Copied ${countRows('cash_events')} cash events`); db.exec('DROP TABLE cash_events_old_nullable')}
+   recreateNullableIndexes();
+  });
+  run();
+  validateMigrationRowCounts(before);
+  assertNoForeignKeyViolations();
+  for(const r of [...foreignKeyList('account_ledger'),...foreignKeyList('cash_events'),...foreignKeyList('transactions')]) if(String(r.table).includes('_old_nullable')) throw Error('[migration] Foreign key still references '+r.table);
+ } finally { db.pragma(`foreign_keys = ${originalFk?1:0}`) }
 }
 function tableColumns(table){return db.prepare(`PRAGMA table_info(${table})`).all().map(c=>c.name)}
 function ensureColumn(table,column,definition){const cols=tableColumns(table); if(!cols.includes(column)){db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`); console.log(`[migration] Added ${table}.${column}`)} else console.log(`[migration] ${table}.${column} already exists`)}
@@ -98,7 +166,7 @@ function insertAccountLedger(conn,entry){const info=conn.prepare('INSERT INTO ac
 function recordOpeningLedger(conn,{camperId,balanceCents,auditLogId,user,createdAt,metadata}){if(!balanceCents) return null; return insertAccountLedger(conn,{camper_id:camperId,entry_type:'opening_balance',amount_cents:balanceCents,balance_before_cents:0,balance_after_cents:balanceCents,audit_log_id:auditLogId,created_by_user_id:user?.id||null,created_by_name:user?.displayName||user?.display_name||null,created_at:createdAt,metadata_json:{zero_entry_policy:'omit_zero_opening_balance',...(metadata||{})}})}
 function applyBalanceChange(conn,{camperId,entryType,deltaCents,setBalanceCents,paymentMethod,reason,transactionId,balanceAdjustmentId,auditLogId,user,createdAt,metadata}){const camper=conn.prepare('SELECT * FROM campers WHERE id=?').get(camperId); if(!camper) throw Error('Camper not found'); const before=camper.current_balance_cents; const after=setBalanceCents!==undefined&&setBalanceCents!==null?setBalanceCents:before+deltaCents; const amount=after-before; if(entryType==='purchase'&&amount>=0) throw Error('Purchase ledger amount must be negative'); if(entryType==='funds_added'&&amount<=0) throw Error('Funds-added ledger amount must be positive'); conn.prepare('UPDATE campers SET current_balance_cents=?,updated_at=? WHERE id=?').run(after,createdAt||now(),camperId); const ledger=insertAccountLedger(conn,{camper_id:camperId,entry_type:entryType,amount_cents:amount,balance_before_cents:before,balance_after_cents:after,payment_method:paymentMethod,reason,transaction_id:transactionId,balance_adjustment_id:balanceAdjustmentId,audit_log_id:auditLogId,created_by_user_id:user?.id||null,created_by_name:user?.displayName||user?.display_name||null,created_at:createdAt,metadata_json:metadata}); return {camper:conn.prepare('SELECT * FROM campers WHERE id=?').get(camperId),ledger}}
 function backfillAccountLedger(){
- db.prepare("INSERT INTO account_ledger(camper_id,entry_type,amount_cents,balance_before_cents,balance_after_cents,transaction_id,created_by_name,created_at,metadata_json) SELECT t.camper_id,'purchase',t.new_balance_cents-t.previous_balance_cents,t.previous_balance_cents,t.new_balance_cents,t.id,t.clerk,t.created_at,json_object('backfilled',1,'source','transactions') FROM transactions t WHERE NOT EXISTS (SELECT 1 FROM account_ledger l WHERE l.transaction_id=t.id)").run();
+ db.prepare("INSERT INTO account_ledger(camper_id,entry_type,amount_cents,balance_before_cents,balance_after_cents,transaction_id,created_by_name,created_at,metadata_json) SELECT t.camper_id,'purchase',t.new_balance_cents-t.previous_balance_cents,t.previous_balance_cents,t.new_balance_cents,t.id,t.clerk,t.created_at,json_object('backfilled',1,'source','transactions') FROM transactions t WHERE t.camper_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM account_ledger l WHERE l.transaction_id=t.id)").run();
  db.prepare("INSERT INTO account_ledger(camper_id,entry_type,amount_cents,balance_before_cents,balance_after_cents,balance_adjustment_id,created_by_name,reason,created_at,metadata_json) SELECT a.camper_id,CASE WHEN a.action='add' THEN 'funds_added' WHEN a.action='subtract' THEN 'funds_subtracted' WHEN a.action='set' THEN 'balance_set' WHEN a.action LIKE 'reconcile_%' THEN 'reconciliation' ELSE 'manual_adjustment' END,a.new_balance_cents-a.previous_balance_cents,a.previous_balance_cents,a.new_balance_cents,a.id,a.admin,a.reason,a.created_at,json_object('backfilled',1,'source','balance_adjustments') FROM balance_adjustments a WHERE NOT EXISTS (SELECT 1 FROM account_ledger l WHERE l.balance_adjustment_id=a.id)").run();
 }
 
