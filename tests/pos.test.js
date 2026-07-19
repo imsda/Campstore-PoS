@@ -720,3 +720,19 @@ test('cash sale workflow source uses application modals instead of browser dialo
   assert.match(cashWorkflow, /Sale completed/);
   assert.match(cashWorkflow, /Complete Cash Sale/);
 });
+
+test('cash deposit success modal uses reusable delegated close handlers', () => {
+  const appSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const htmlSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const cashWorkflow = appSource.slice(appSource.indexOf('let cashState'), appSource.indexOf("$('camperSearch').oninput"));
+  const submitSuccess = appSource.match(/cashState\.result=d; await load\(\); cashState\.submitting=false;/);
+
+  assert.match(htmlSource, /id="cashClose"[^>]*data-cash-close/);
+  assert.match(cashWorkflow, /function closeCashModal\(\)/);
+  assert.match(cashWorkflow, /document\.body\.style\.overflow=''/);
+  assert.match(cashWorkflow, /data-cash-close>Done/);
+  assert.match(cashWorkflow, /data-cash-add-another>Add Another Cash Deposit/);
+  assert.match(appSource, /cashModal'\)\.addEventListener\('click'/);
+  assert.ok(submitSuccess, 'successful deposit must clear the submitting flag before showing result actions');
+  assert.doesNotMatch(cashWorkflow, /\b(?:window\.)?(?:confirm|alert|prompt)\s*\(/);
+});
