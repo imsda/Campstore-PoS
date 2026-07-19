@@ -217,3 +217,95 @@ test('page permissions, stock additions, and final owner protection', async () =
     assert.equal(r.status, 400);
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
+
+test('account ledger records sales, adjustments, people creation, direct-edit protection, and backfill idempotency', async () => {
+  const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path'); const assert = require('node:assert');
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'campstore-ledger-')), 'test.sqlite');
+  process.env.DATABASE_PATH = dbPath; process.env.DEFAULT_OWNER_USERNAME = 'ownerl'; process.env.DEFAULT_OWNER_PASSWORD = 'secret123'; process.env.SESSION_SECRET = 'ledger-secret';
+  delete require.cache[require.resolve('../server')];
+  const mod = require('../server'); const { app, db, migrate } = mod;
+  const server = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const req = async (method, url, body, cookie) => fetch(base + url, { method, headers: { 'Content-Type': 'application/json', cookie }, body: JSON.stringify(body) });
+  try {
+    const login = await req('POST', '/api/login', { username: 'ownerl', password: 'secret123' }, '');
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+
+    let r = await req('POST', '/api/campers', { name: 'Ledger Lily', person_type: 'Camper', initial_balance: '50.00', current_balance: '50.00', active: true, notes: '' }, cookie);
+    assert.equal(r.status, 200);
+    const camperId = (await r.json()).id;
+    assert.equal(db.prepare("SELECT count(*) c FROM account_ledger WHERE camper_id=? AND entry_type='opening_balance'").get(camperId).c, 1);
+
+    r = await req('POST', '/api/campers', { name: 'Zero Zoe', person_type: 'Camper', initial_balance: '0.00', current_balance: '0.00', active: true, notes: '' }, cookie);
+    assert.equal(r.status, 200);
+    const zeroId = (await r.json()).id;
+    assert.equal(db.prepare('SELECT count(*) c FROM account_ledger WHERE camper_id=?').get(zeroId).c, 0);
+
+    db.prepare('INSERT INTO items(id,name,cost_cents,category,active,stock_qty,updated_at) VALUES(?,?,?,?,?,?,?)').run('snack_ledger', 'Snack Ledger', 125, 'Food', 1, 10, new Date().toISOString());
+    r = await req('POST', '/api/sale', { camperId, cart: [{ id: 'snack_ledger', qty: 2 }] }, cookie);
+    assert.equal(r.status, 200);
+    const txid = (await r.json()).id;
+    assert.equal(db.prepare('SELECT count(*) c FROM transactions WHERE id=?').get(txid).c, 1);
+    const purchase = db.prepare('SELECT * FROM account_ledger WHERE transaction_id=?').get(txid);
+    assert.equal(purchase.entry_type, 'purchase');
+    assert.equal(purchase.amount_cents, -250);
+    assert.equal(purchase.balance_before_cents, 5000);
+    assert.equal(purchase.balance_after_cents, 4750);
+
+    r = await req('POST', `/api/campers/${camperId}/adjust`, { action: 'add', amount: '5.00', reason: 'test add' }, cookie);
+    assert.equal(r.status, 200);
+    let adjId = (await r.json()).id;
+    let ledger = db.prepare('SELECT * FROM account_ledger WHERE balance_adjustment_id=?').get(adjId);
+    assert.equal(ledger.entry_type, 'funds_added'); assert.equal(ledger.amount_cents, 500);
+    r = await req('POST', `/api/campers/${camperId}/adjust`, { action: 'subtract', amount: '3.00', reason: 'test subtract' }, cookie);
+    adjId = (await r.json()).id; ledger = db.prepare('SELECT * FROM account_ledger WHERE balance_adjustment_id=?').get(adjId);
+    assert.equal(ledger.entry_type, 'funds_subtracted'); assert.equal(ledger.amount_cents, -300);
+    r = await req('POST', `/api/campers/${camperId}/adjust`, { action: 'set', amount: '42.00', reason: 'test set' }, cookie);
+    adjId = (await r.json()).id; ledger = db.prepare('SELECT * FROM account_ledger WHERE balance_adjustment_id=?').get(adjId);
+    assert.equal(ledger.entry_type, 'balance_set'); assert.equal(ledger.amount_cents, 4200 - 4950);
+
+    r = await req('POST', `/api/campers/${camperId}`, { name: 'Ledger Lily 2', person_type: 'Camper', current_balance: '99.00', initial_balance: '50.00', active: true, notes: 'x' }, cookie);
+    assert.equal(r.status, 400);
+    r = await req('POST', `/api/campers/${camperId}`, { name: 'Ledger Lily 2', person_type: 'Camper', current_balance: '42.00', initial_balance: '50.00', active: true, notes: 'x' }, cookie);
+    assert.equal(r.status, 200);
+    assert.equal(db.prepare('SELECT name,current_balance_cents FROM campers WHERE id=?').get(camperId).name, 'Ledger Lily 2');
+
+    db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('hist_camper','Hist Camper','Camper',1000,800,1,'manual','2026-01-01T00:00:00.000Z');
+    db.prepare('INSERT INTO transactions(id,created_at,clerk,camper_id,camper_name,previous_balance_cents,total_cents,new_balance_cents,items_json) VALUES(?,?,?,?,?,?,?,?,?)').run('tx_hist','2026-01-02T00:00:00.000Z','Tester','hist_camper','Hist Camper',1000,200,800,'[]');
+    db.prepare('INSERT INTO balance_adjustments(id,created_at,admin,camper_id,camper_name,action,amount_cents,previous_balance_cents,new_balance_cents,reason) VALUES(?,?,?,?,?,?,?,?,?,?)').run('adj_hist','2026-01-03T00:00:00.000Z','Tester','hist_camper','Hist Camper','add',100,800,900,'hist');
+    migrate(); migrate();
+    assert.equal(db.prepare('SELECT count(*) c FROM account_ledger WHERE transaction_id=?').get('tx_hist').c, 1);
+    assert.equal(db.prepare('SELECT count(*) c FROM account_ledger WHERE balance_adjustment_id=?').get('adj_hist').c, 1);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('ledger insert failures roll back sale and adjustment side effects', async () => {
+  const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path'); const assert = require('node:assert');
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'campstore-ledger-rollback-')), 'test.sqlite');
+  process.env.DATABASE_PATH = dbPath; process.env.DEFAULT_OWNER_USERNAME = 'ownerr'; process.env.DEFAULT_OWNER_PASSWORD = 'secret123'; process.env.SESSION_SECRET = 'rollback-secret';
+  delete require.cache[require.resolve('../server')];
+  const { app, db } = require('../server');
+  const stamp = new Date().toISOString();
+  db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('roll_camper','Roll Camper','Camper',1000,1000,1,'manual',stamp);
+  db.prepare('INSERT INTO items(id,name,cost_cents,category,active,stock_qty,updated_at) VALUES(?,?,?,?,?,?,?)').run('roll_item','Roll Item',200,'Food',1,5,stamp);
+  const server = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = async (url, body, cookie) => fetch(base + url, { method: 'POST', headers: { 'Content-Type': 'application/json', cookie }, body: JSON.stringify(body) });
+  try {
+    const login = await post('/api/login', { username: 'ownerr', password: 'secret123' }, '');
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    db.exec("CREATE TRIGGER fail_purchase_ledger BEFORE INSERT ON account_ledger WHEN NEW.entry_type='purchase' BEGIN SELECT RAISE(ABORT, 'forced purchase ledger failure'); END;");
+    let r = await post('/api/sale', { camperId: 'roll_camper', cart: [{ id: 'roll_item', qty: 1 }] }, cookie);
+    assert.equal(r.status, 400);
+    assert.equal(db.prepare('SELECT current_balance_cents FROM campers WHERE id=?').get('roll_camper').current_balance_cents, 1000);
+    assert.equal(db.prepare('SELECT stock_qty FROM items WHERE id=?').get('roll_item').stock_qty, 5);
+    assert.equal(db.prepare('SELECT count(*) c FROM transactions').get().c, 0);
+    db.exec('DROP TRIGGER fail_purchase_ledger');
+
+    db.exec("CREATE TRIGGER fail_adjustment_ledger BEFORE INSERT ON account_ledger WHEN NEW.entry_type='funds_added' BEGIN SELECT RAISE(ABORT, 'forced adjustment ledger failure'); END;");
+    r = await post('/api/campers/roll_camper/adjust', { action: 'add', amount: '5.00', reason: 'rollback' }, cookie);
+    assert.equal(r.status, 400);
+    assert.equal(db.prepare('SELECT current_balance_cents FROM campers WHERE id=?').get('roll_camper').current_balance_cents, 1000);
+    assert.equal(db.prepare('SELECT count(*) c FROM balance_adjustments').get().c, 0);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
