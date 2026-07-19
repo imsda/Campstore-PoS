@@ -376,34 +376,41 @@ test('camper history endpoint enforces authz, isolation, pagination, purchase an
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
 
-test('Phase 4 People table default columns and usability affordances are present', () => {
+test('People table is a clean summary view and edit dialog preserves person type', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.html'), 'utf8');
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
   const js = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.js'), 'utf8');
   const peopleBlock = html.match(/<div class="panel wide" id="people">[\s\S]*?<div id="personDetailsModal"/)[0];
-  assert.match(peopleBlock, /<th class="col-name sticky-col sticky-left">Name<\/th>/);
-  assert.match(peopleBlock, /<th class="col-actions sticky-col sticky-right">Actions<\/th>/);
-  assert.doesNotMatch(peopleBlock, /<th[^>]*>Source<\/th>/);
-  assert.doesNotMatch(peopleBlock, /Last Imported\/Updated/);
-  assert.match(html, /id="personDetailsModal"/);
+  const headers = [...peopleBlock.matchAll(/<th[^>]*>([^<]+)<\/th>/g)].map(m => m[1]);
+  assert.deepEqual(headers, ['Name', 'Cabin', 'Opening Balance', 'Current Balance', 'Active', 'Actions']);
+  assert.doesNotMatch(peopleBlock.match(/<thead>[\s\S]*?<\/thead>/)[0], /Type|Person Type|Notes|Source|Last Imported\/Updated|External ID|Sheet row/);
+  assert.doesNotMatch(peopleBlock, /peopleScrollLeft|peopleScrollRight|Shift \+ mouse wheel|Scroll table left|Scroll table right/);
+  assert.match(js, /person-name-text/);
+  assert.doesNotMatch(js.match(/function renderPeople\(\)[\s\S]*?\nfunction showPersonDetails/)[0].replace(/\nfunction showPersonDetails$/, ''), /<input id=\"pn-|<select id=\"py-|Move|Save<\/button>|>Details<|\+ Funds|Set Balance|Correct Opening Balance|id=\"pt-/);
   assert.match(js, /showPersonDetails/);
+  assert.match(js, /Person Type<select id=\"editType\"/);
+  assert.match(js, /personTypeOptions\(p\.person_type\)/);
+  assert.match(js, /person_type:\$\('editType'\)\.value/);
+  assert.match(js, /name:\$\('editName'\)\.value,person_type:\$\('editType'\)\.value,active/);
+  assert.doesNotMatch(js.match(/async function savePerson[\s\S]*?async function correctOpening/)[0], /initial_balance|current_balance/);
   assert.match(js, /Source/);
-  assert.match(js, /Last imported\/updated/);
-  assert.match(css, /\.people-table \.col-name\{width:320px;min-width:320px\}/);
+  assert.match(js, /Last Imported\/Updated/);
+  assert.match(js, /External ID/);
+  assert.match(js, /Sheet row/);
+  assert.match(js, /Correct Opening Balance/);
+  assert.match(css, /\.people-table\{min-width:980px;width:100%;table-layout:fixed/);
+  assert.match(css, /\.people-table \.col-name\{width:34%;min-width:260px\}/);
   assert.match(css, /\.people-table th\{position:sticky;top:0/);
-  assert.match(css, /\.people-table \.sticky-left\{position:sticky;left:0/);
-  assert.match(css, /\.people-table \.sticky-right\{position:sticky;right:0/);
 });
 
-test('Phase 4 People table horizontal scrolling controls are wired safely', () => {
-  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.html'), 'utf8');
+test('People active checkbox saves immediately and rolls back failures without clearing person type', () => {
   const js = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.js'), 'utf8');
-  assert.match(html, /id="peopleTableScroll"/);
-  assert.match(html, /aria-label="Scroll table left"/);
-  assert.match(html, /aria-label="Scroll table right"/);
-  assert.match(js, /setupPeopleScrolling/);
-  assert.match(js, /addEventListener\('wheel'/);
-  assert.match(js, /if\(!e\.shiftKey\)return/);
-  assert.match(js, /scrollBy\(\{left:-Math\.max\(320/);
-  assert.match(js, /scrollBy\(\{left:Math\.max\(320/);
+  const fn = js.match(/async function toggleActive[\s\S]*?async function moveCabin/)[0];
+  assert.match(js.match(/function renderPeople\(\)[\s\S]*?\nfunction showPersonDetails/)[0].replace(/\nfunction showPersonDetails$/, ''), /onchange=\"toggleActive/);
+  assert.match(fn, /el\.disabled=true/);
+  assert.match(fn, /person_type:p\.person_type/);
+  assert.match(fn, /expected_updated_at:p\.updated_at/);
+  assert.match(fn, /el\.checked=previous/);
+  assert.doesNotMatch(fn, /initial_balance|current_balance/);
 });
+
