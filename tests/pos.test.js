@@ -1,4 +1,4 @@
-const test = require('node:test'); const assert = require('node:assert');
+const test = require('node:test'); const assert = require('node:assert'); const fs = require('node:fs'); const path = require('node:path');
 test('money math stays in cents',()=>{assert.equal(125+375,500)});
 test('transaction ids should be externally identifiable',()=>{assert.match('tx_abc123',/^tx_/)});
 
@@ -374,4 +374,36 @@ test('camper history endpoint enforces authz, isolation, pagination, purchase an
     const ownerCookie = await login('ownerh');
     assert.equal((await fetch(`${base}/api/campers/camper_a/history`, { headers:{cookie:ownerCookie} })).status, 200);
   } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('Phase 4 People table default columns and usability affordances are present', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+  const js = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.js'), 'utf8');
+  const peopleBlock = html.match(/<div class="panel wide" id="people">[\s\S]*?<div id="personDetailsModal"/)[0];
+  assert.match(peopleBlock, /<th class="col-name sticky-col sticky-left">Name<\/th>/);
+  assert.match(peopleBlock, /<th class="col-actions sticky-col sticky-right">Actions<\/th>/);
+  assert.doesNotMatch(peopleBlock, /<th[^>]*>Source<\/th>/);
+  assert.doesNotMatch(peopleBlock, /Last Imported\/Updated/);
+  assert.match(html, /id="personDetailsModal"/);
+  assert.match(js, /showPersonDetails/);
+  assert.match(js, /Source/);
+  assert.match(js, /Last imported\/updated/);
+  assert.match(css, /\.people-table \.col-name\{width:320px;min-width:320px\}/);
+  assert.match(css, /\.people-table th\{position:sticky;top:0/);
+  assert.match(css, /\.people-table \.sticky-left\{position:sticky;left:0/);
+  assert.match(css, /\.people-table \.sticky-right\{position:sticky;right:0/);
+});
+
+test('Phase 4 People table horizontal scrolling controls are wired safely', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.html'), 'utf8');
+  const js = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.js'), 'utf8');
+  assert.match(html, /id="peopleTableScroll"/);
+  assert.match(html, /aria-label="Scroll table left"/);
+  assert.match(html, /aria-label="Scroll table right"/);
+  assert.match(js, /setupPeopleScrolling/);
+  assert.match(js, /addEventListener\('wheel'/);
+  assert.match(js, /if\(!e\.shiftKey\)return/);
+  assert.match(js, /scrollBy\(\{left:-Math\.max\(320/);
+  assert.match(js, /scrollBy\(\{left:Math\.max\(320/);
 });
