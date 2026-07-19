@@ -309,3 +309,56 @@ test('ledger insert failures roll back sale and adjustment side effects', async 
     assert.equal(db.prepare('SELECT count(*) c FROM balance_adjustments').get().c, 0);
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
+
+test('camper history endpoint enforces authz, isolation, pagination, purchase and adjustment details', async () => {
+  const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path'); const assert = require('node:assert');
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'campstore-history-')), 'test.sqlite');
+  process.env.DATABASE_PATH = dbPath; process.env.DEFAULT_OWNER_USERNAME = 'ownerh'; process.env.DEFAULT_OWNER_PASSWORD = 'secret123'; process.env.SESSION_SECRET = 'history-secret';
+  delete require.cache[require.resolve('../server')];
+  const { app, db, hashPassword } = require('../server');
+  const stamp = '2026-02-01T00:00:00.000Z';
+  db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('clerkh','clerkh','No People','CLERK',hashPassword('secret123'),1,stamp,stamp);
+  db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('peopleh','peopleh','People User','CLERK',hashPassword('secret123'),1,stamp,stamp);
+  db.prepare('INSERT INTO user_page_permissions(user_id,permission_key,allowed,created_at,updated_at) VALUES(?,?,?,?,?)').run('peopleh','page.people',1,stamp,stamp);
+  db.prepare('INSERT INTO campers(id,name,person_type,cabin,initial_balance_cents,current_balance_cents,active,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?)').run('camper_a','History A','Camper','Cabin 1',5000,3250,1,'manual',stamp);
+  db.prepare('INSERT INTO campers(id,name,person_type,cabin,initial_balance_cents,current_balance_cents,active,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?)').run('camper_b','History B','Camper','Cabin 2',2000,2000,1,'manual',stamp);
+  db.prepare('INSERT INTO transactions(id,created_at,clerk,camper_id,camper_name,previous_balance_cents,total_cents,new_balance_cents,items_json) VALUES(?,?,?,?,?,?,?,?,?)').run('tx_a','2026-02-02T00:00:00.000Z','Clerk','camper_a','History A',5000,450,4550,JSON.stringify([{name:'Snack',qty:2,price_cents:125,line_total_cents:250},{item_name:'Juice',quantity:1,unit_price_cents:200}]));
+  db.prepare('INSERT INTO transactions(id,created_at,clerk,camper_id,camper_name,previous_balance_cents,total_cents,new_balance_cents,items_json) VALUES(?,?,?,?,?,?,?,?,?)').run('tx_bad','2026-02-04T00:00:00.000Z','Clerk','camper_a','History A',4550,100,4450,'not json');
+  db.prepare('INSERT INTO transactions(id,created_at,clerk,camper_id,camper_name,previous_balance_cents,total_cents,new_balance_cents,items_json) VALUES(?,?,?,?,?,?,?,?,?)').run('tx_b','2026-02-05T00:00:00.000Z','Clerk','camper_b','History B',2000,100,1900,'[]');
+  db.prepare('INSERT INTO balance_adjustments(id,created_at,admin,camper_id,camper_name,action,amount_cents,previous_balance_cents,new_balance_cents,reason) VALUES(?,?,?,?,?,?,?,?,?,?)').run('adj_a','2026-02-03T00:00:00.000Z','Admin','camper_a','History A','add',500,4550,5050,'Deposit');
+  db.prepare('INSERT INTO account_ledger(camper_id,entry_type,amount_cents,balance_before_cents,balance_after_cents,created_at,metadata_json) VALUES(?,?,?,?,?,?,?)').run('camper_a','opening_balance',5000,0,5000,'2026-02-01T00:00:00.000Z',JSON.stringify({backfilled:1}));
+  db.prepare('INSERT INTO account_ledger(camper_id,entry_type,amount_cents,balance_before_cents,balance_after_cents,transaction_id,created_by_name,created_at) VALUES(?,?,?,?,?,?,?,?)').run('camper_a','purchase',-450,5000,4550,'tx_a','Clerk','2026-02-02T00:00:00.000Z');
+  db.prepare('INSERT INTO account_ledger(camper_id,entry_type,amount_cents,balance_before_cents,balance_after_cents,balance_adjustment_id,reason,created_by_name,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run('camper_a','funds_added',500,4550,5050,'adj_a','Deposit','Admin','2026-02-03T00:00:00.000Z');
+  db.prepare('INSERT INTO account_ledger(camper_id,entry_type,amount_cents,balance_before_cents,balance_after_cents,transaction_id,created_by_name,created_at) VALUES(?,?,?,?,?,?,?,?)').run('camper_a','purchase',-100,4550,4450,'tx_bad','Clerk','2026-02-04T00:00:00.000Z');
+  db.prepare('INSERT INTO account_ledger(camper_id,entry_type,amount_cents,balance_before_cents,balance_after_cents,transaction_id,created_by_name,created_at) VALUES(?,?,?,?,?,?,?,?)').run('camper_a','purchase',-999,9999,9000,'tx_b','Clerk','2026-02-05T00:00:00.000Z');
+  db.prepare('INSERT INTO account_ledger(camper_id,entry_type,amount_cents,balance_before_cents,balance_after_cents,transaction_id,created_by_name,created_at) VALUES(?,?,?,?,?,?,?,?)').run('camper_b','purchase',-100,2000,1900,'tx_b','Clerk','2026-02-06T00:00:00.000Z');
+  const server = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = async username => (await fetch(`${base}/api/login`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username,password:'secret123'}) })).headers.get('set-cookie').split(';')[0];
+  try {
+    assert.equal((await fetch(`${base}/api/campers/camper_a/history`)).status, 401);
+    const noPeopleCookie = await login('clerkh');
+    assert.equal((await fetch(`${base}/api/campers/camper_a/history`, { headers:{cookie:noPeopleCookie} })).status, 403);
+    const peopleCookie = await login('peopleh');
+    let r = await fetch(`${base}/api/campers/missing/history`, { headers:{cookie:peopleCookie} });
+    assert.equal(r.status, 404);
+    r = await fetch(`${base}/api/campers/camper_a/history?limit=2&offset=1`, { headers:{cookie:peopleCookie} });
+    assert.equal(r.status, 200);
+    let d = await r.json();
+    assert.deepEqual(d.camper, { id:'camper_a', name:'History A', person_type:'Camper', cabin:'Cabin 1', initial_balance_cents:5000, current_balance_cents:3250, active:1 });
+    assert.equal(d.pagination.limit, 2); assert.equal(d.pagination.offset, 1); assert.equal(d.pagination.total, 5); assert.equal(d.pagination.has_more, true);
+    assert.deepEqual(d.entries.map(e => e.created_at), ['2026-02-04T00:00:00.000Z','2026-02-03T00:00:00.000Z']);
+    assert.ok(d.entries.every(e => e.transaction_id !== 'tx_b'));
+    assert.equal(d.entries[0].purchase.details_available, false);
+    assert.equal(d.entries[1].adjustment.action, 'add'); assert.equal(d.entries[1].adjustment.administrator_name, 'Admin'); assert.equal(d.entries[1].amount_cents, 500);
+    r = await fetch(`${base}/api/campers/camper_a/history?limit=500`, { headers:{cookie:peopleCookie} });
+    d = await r.json();
+    assert.equal(d.pagination.limit, 100);
+    const validPurchase = d.entries.find(e => e.transaction_id === 'tx_a');
+    assert.equal(validPurchase.purchase.total_cents, 450);
+    assert.deepEqual(validPurchase.purchase.items, [{ name:'Snack', quantity:2, unit_price_cents:125, line_total_cents:250 }, { name:'Juice', quantity:1, unit_price_cents:200, line_total_cents:200 }]);
+    assert.ok(!d.entries.some(e => e.camper_id === 'camper_b'));
+    const ownerCookie = await login('ownerh');
+    assert.equal((await fetch(`${base}/api/campers/camper_a/history`, { headers:{cookie:ownerCookie} })).status, 200);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
