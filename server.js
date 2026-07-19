@@ -29,7 +29,7 @@ function migrate(){
  CREATE TABLE IF NOT EXISTS balance_adjustments(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,admin TEXT,camper_id TEXT NOT NULL,camper_name TEXT NOT NULL,action TEXT NOT NULL,amount_cents INTEGER,previous_balance_cents INTEGER NOT NULL,new_balance_cents INTEGER NOT NULL,reason TEXT NOT NULL,sync_status TEXT NOT NULL DEFAULT 'pending',synced_at TEXT,error TEXT);
  CREATE TABLE IF NOT EXISTS audit_logs(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,admin TEXT,action TEXT NOT NULL,person_id TEXT,person_name TEXT,initial_balance_cents INTEGER,current_balance_cents INTEGER,details_json TEXT);
  CREATE TABLE IF NOT EXISTS account_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT,camper_id TEXT NOT NULL,entry_type TEXT NOT NULL,amount_cents INTEGER NOT NULL,balance_before_cents INTEGER NOT NULL,balance_after_cents INTEGER NOT NULL,payment_method TEXT,reason TEXT,transaction_id TEXT,balance_adjustment_id TEXT,audit_log_id TEXT,created_by_user_id TEXT,created_by_name TEXT,created_at TEXT NOT NULL,metadata_json TEXT,FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(transaction_id) REFERENCES transactions(id),FOREIGN KEY(balance_adjustment_id) REFERENCES balance_adjustments(id),FOREIGN KEY(audit_log_id) REFERENCES audit_logs(id),FOREIGN KEY(created_by_user_id) REFERENCES users(id));
- CREATE TABLE IF NOT EXISTS cash_events(id TEXT PRIMARY KEY,account_ledger_id INTEGER,camper_id TEXT,event_type TEXT NOT NULL,amount_credited_cents INTEGER NOT NULL DEFAULT 0,cash_received_cents INTEGER NOT NULL,change_given_cents INTEGER NOT NULL,reason TEXT,created_by_user_id TEXT,created_by_name TEXT,created_at TEXT NOT NULL,client_request_id TEXT UNIQUE,cash_box_session_id INTEGER,transaction_id TEXT,sale_total_cents INTEGER NOT NULL DEFAULT 0,net_drawer_change_cents INTEGER NOT NULL DEFAULT 0,FOREIGN KEY(account_ledger_id) REFERENCES account_ledger(id),FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(created_by_user_id) REFERENCES users(id),FOREIGN KEY(transaction_id) REFERENCES transactions(id));
+ CREATE TABLE IF NOT EXISTS cash_events(id TEXT PRIMARY KEY,account_ledger_id INTEGER,camper_id TEXT,event_type TEXT NOT NULL,amount_credited_cents INTEGER NOT NULL DEFAULT 0,cash_received_cents INTEGER NOT NULL,change_given_cents INTEGER NOT NULL,reason TEXT,created_by_user_id TEXT,created_by_name TEXT,created_at TEXT NOT NULL,client_request_id TEXT UNIQUE,cash_box_session_id INTEGER,transaction_id TEXT,sale_total_cents INTEGER NOT NULL DEFAULT 0,net_drawer_change_cents INTEGER NOT NULL DEFAULT 0,FOREIGN KEY(account_ledger_id) REFERENCES account_ledger(id),FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(created_by_user_id) REFERENCES users(id),FOREIGN KEY(cash_box_session_id) REFERENCES cash_box_sessions(id),FOREIGN KEY(transaction_id) REFERENCES transactions(id));
  CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,username TEXT NOT NULL UNIQUE,display_name TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('OWNER','ADMIN','CLERK')),password_hash TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);`);
 
  // Existing databases may have older tables. Add columns before any SQL below
@@ -80,7 +80,9 @@ function migrate(){
  CREATE INDEX IF NOT EXISTS idx_account_ledger_adjustment ON account_ledger(balance_adjustment_id);
  CREATE INDEX IF NOT EXISTS idx_cash_events_ledger ON cash_events(account_ledger_id);
  CREATE INDEX IF NOT EXISTS idx_cash_events_camper ON cash_events(camper_id);
- CREATE INDEX IF NOT EXISTS idx_cash_events_created ON cash_events(created_at);`);
+ CREATE INDEX IF NOT EXISTS idx_cash_events_created ON cash_events(created_at);
+ CREATE INDEX IF NOT EXISTS idx_cash_events_transaction ON cash_events(transaction_id);
+ CREATE INDEX IF NOT EXISTS idx_cash_events_cash_box_session ON cash_events(cash_box_session_id);`);
  backfillAccountLedger();
  ensureItemsNameCategoryIndex();
  setDefault('allow_over_balance', String(process.env.ALLOW_OVER_BALANCE === 'true'));
@@ -135,27 +137,28 @@ function validateMigrationRowCounts(before){
 }
 
 function tableSql(name){return db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(name)?.sql||''}
-function schemaMentionsOldNullable(table){return tableSql(table).includes('transactions_old_nullable')||foreignKeyList(table).some(r=>String(r.table).includes('transactions_old_nullable'))}
+function oldNullableTarget(table){return String(table).includes('_old_nullable')}
+function cashEventsHasStaleForeignKeys(){return foreignKeyList('cash_events').some(r=>['transactions_old_nullable','account_ledger_old_nullable'].includes(String(r.table)))}
 function assertNoOldNullableReferences(){
- const schemaRows=db.prepare("SELECT type,name,sql FROM sqlite_master WHERE sql LIKE '%transactions_old_nullable%'").all();
- if(schemaRows.length) throw Error('[migration] Schema still references transactions_old_nullable: '+schemaRows.map(r=>`${r.type}:${r.name}`).join(', '));
- for(const table of ['transactions','account_ledger','cash_events','cash_box_sessions','cash_box_adjustments']) for(const r of foreignKeyList(table)) if(String(r.table).includes('transactions_old_nullable')) throw Error(`[migration] ${table}.${r.from} still references ${r.table}.${r.to}`);
+ const schemaRows=db.prepare("SELECT type,name,sql FROM sqlite_master WHERE sql LIKE '%_old_nullable%'").all();
+ if(schemaRows.length) throw Error('[migration] Schema still references *_old_nullable: '+schemaRows.map(r=>`${r.type}:${r.name}`).join(', '));
+ for(const table of ['transactions','account_ledger','cash_events','cash_box_sessions','cash_box_adjustments']) for(const r of foreignKeyList(table)) if(oldNullableTarget(r.table)) throw Error(`[migration] ${table}.${r.from} still references ${r.table}.${r.to}`);
 }
 function repairStaleNullableForeignKeys(){
- const candidates=['account_ledger','cash_events'].filter(t=>tableExists(t)&&schemaMentionsOldNullable(t));
- if(!candidates.length){assertNoOldNullableReferences(); return}
- for(const table of ['transactions','account_ledger','cash_events','cash_box_sessions','cash_box_adjustments']) for(const r of foreignKeyList(table)) if(String(r.table).includes('transactions_old_nullable')) console.log(`[migration] Stale foreign key detected: ${table}.${r.from} -> ${r.table}.${r.to}`);
+ const rebuildCash=tableExists('cash_events')&&cashEventsHasStaleForeignKeys();
+ if(!rebuildCash){assertNoOldNullableReferences(); return}
+ for(const r of foreignKeyList('cash_events')) if(['transactions_old_nullable','account_ledger_old_nullable'].includes(String(r.table))) console.log(`[migration] Stale foreign key detected: cash_events.${r.from} -> ${r.table}.${r.to}`);
  const before={counts:{transactions:countRows('transactions'),cash_events:countRows('cash_events'),account_ledger:countRows('account_ledger')},transactionIds:idSet('transactions'),cashEventIds:idSet('cash_events'),accountLedgerIds:idSet('account_ledger')};
  const originalFk=db.pragma('foreign_keys',{simple:true});
  try{
   db.pragma('foreign_keys = OFF');
   const run=db.transaction(()=>{
-   if(candidates.includes('cash_events')){console.log('[migration] Repairing stale cash_events transaction foreign key'); db.exec('ALTER TABLE cash_events RENAME TO cash_events_stale_fk'); createCashEventsTable('cash_events'); copyTable('cash_events_stale_fk','cash_events',['id','account_ledger_id','camper_id','event_type','amount_credited_cents','cash_received_cents','change_given_cents','reason','created_by_user_id','created_by_name','created_at','client_request_id','cash_box_session_id','transaction_id','sale_total_cents','net_drawer_change_cents'],{amount_credited_cents:'0',sale_total_cents:'0',net_drawer_change_cents:'0'}); console.log(`[migration] Copied ${countRows('cash_events')} cash events`); db.exec('DROP TABLE cash_events_stale_fk')}
-   if(candidates.includes('account_ledger')){console.log('[migration] Repairing stale account_ledger transaction foreign key'); db.exec('ALTER TABLE account_ledger RENAME TO account_ledger_stale_fk'); createAccountLedgerTable('account_ledger'); copyTable('account_ledger_stale_fk','account_ledger',['id','camper_id','entry_type','amount_cents','balance_before_cents','balance_after_cents','payment_method','reason','transaction_id','balance_adjustment_id','audit_log_id','created_by_user_id','created_by_name','created_at','metadata_json'],{}); console.log(`[migration] Copied ${countRows('account_ledger')} account ledger rows`); db.exec('DROP TABLE account_ledger_stale_fk')}
+   console.log('[migration] Repairing stale cash_events foreign keys'); db.exec('ALTER TABLE cash_events RENAME TO cash_events_stale_fk'); createCashEventsTable('cash_events'); copyTable('cash_events_stale_fk','cash_events',['id','account_ledger_id','camper_id','event_type','amount_credited_cents','cash_received_cents','change_given_cents','reason','created_by_user_id','created_by_name','created_at','client_request_id','cash_box_session_id','transaction_id','sale_total_cents','net_drawer_change_cents'],{amount_credited_cents:'0',sale_total_cents:'0',net_drawer_change_cents:'0'}); console.log(`[migration] Copied ${countRows('cash_events')} cash events`); db.exec('DROP TABLE cash_events_stale_fk');
    recreateNullableIndexes();
   });
   run();
   validateMigrationRowCounts(before);
+  console.log(`[migration] Verified cash_events row count before/after: ${before.counts.cash_events}/${countRows('cash_events')}`);
   console.log('[migration] Verified transaction references');
   const badCashLedger=db.prepare('SELECT count(*) c FROM cash_events ce LEFT JOIN account_ledger l ON l.id=ce.account_ledger_id WHERE ce.account_ledger_id IS NOT NULL AND l.id IS NULL').get().c;
   if(badCashLedger) throw Error(`[migration] Unresolved account-ledger references after stale foreign-key repair: cash_events=${badCashLedger}`);
@@ -187,7 +190,7 @@ function ensureNullableTransactionsAndCashEvents(){
   run();
   validateMigrationRowCounts(before);
   assertNoForeignKeyViolations();
-  for(const r of [...foreignKeyList('account_ledger'),...foreignKeyList('cash_events'),...foreignKeyList('transactions')]) if(String(r.table).includes('_old_nullable')) throw Error('[migration] Foreign key still references '+r.table);
+  for(const r of [...foreignKeyList('account_ledger'),...foreignKeyList('cash_events'),...foreignKeyList('transactions')]) if(oldNullableTarget(r.table)) throw Error('[migration] Foreign key still references '+r.table);
  } finally { db.pragma(`foreign_keys = ${originalFk?1:0}`) }
 }
 function tableColumns(table){return db.prepare(`PRAGMA table_info(${table})`).all().map(c=>c.name)}

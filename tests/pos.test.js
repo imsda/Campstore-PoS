@@ -668,7 +668,7 @@ test('nullable transaction migration copy failure rolls back original tables', (
   check.close();
 });
 
-test('repairs stale cash_events foreign key referencing transactions_old_nullable idempotently', () => {
+test('repairs stale cash_events foreign keys referencing old nullable tables idempotently', () => {
   const os = require('node:os');
   const Database = require('better-sqlite3');
   const { execFileSync } = require('node:child_process');
@@ -684,21 +684,24 @@ test('repairs stale cash_events foreign key referencing transactions_old_nullabl
     CREATE TABLE audit_logs(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,admin TEXT,action TEXT NOT NULL);
     CREATE TABLE account_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT,camper_id TEXT NOT NULL,entry_type TEXT NOT NULL,amount_cents INTEGER NOT NULL,balance_before_cents INTEGER NOT NULL,balance_after_cents INTEGER NOT NULL,payment_method TEXT,reason TEXT,transaction_id TEXT,balance_adjustment_id TEXT,audit_log_id TEXT,created_by_user_id TEXT,created_by_name TEXT,created_at TEXT NOT NULL,metadata_json TEXT,FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(transaction_id) REFERENCES transactions(id),FOREIGN KEY(created_by_user_id) REFERENCES users(id));
     CREATE TABLE cash_box_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,opening_amount_cents INTEGER NOT NULL,opened_at TEXT NOT NULL,opened_by_user_id TEXT,opened_by_name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open');
-    CREATE TABLE cash_events(id TEXT PRIMARY KEY,account_ledger_id INTEGER,camper_id TEXT,event_type TEXT NOT NULL,amount_credited_cents INTEGER NOT NULL DEFAULT 0,cash_received_cents INTEGER NOT NULL,change_given_cents INTEGER NOT NULL,reason TEXT,created_by_user_id TEXT,created_by_name TEXT,created_at TEXT NOT NULL,client_request_id TEXT UNIQUE,cash_box_session_id INTEGER,transaction_id TEXT,sale_total_cents INTEGER NOT NULL DEFAULT 0,net_drawer_change_cents INTEGER NOT NULL DEFAULT 0,FOREIGN KEY(account_ledger_id) REFERENCES account_ledger(id),FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(created_by_user_id) REFERENCES users(id),FOREIGN KEY(transaction_id) REFERENCES transactions_old_nullable(id));`);
+    CREATE TABLE cash_events(id TEXT PRIMARY KEY,account_ledger_id INTEGER,camper_id TEXT,event_type TEXT NOT NULL,amount_credited_cents INTEGER NOT NULL DEFAULT 0,cash_received_cents INTEGER NOT NULL,change_given_cents INTEGER NOT NULL,reason TEXT,created_by_user_id TEXT,created_by_name TEXT,created_at TEXT NOT NULL,client_request_id TEXT UNIQUE,cash_box_session_id INTEGER,transaction_id TEXT,sale_total_cents INTEGER NOT NULL DEFAULT 0,net_drawer_change_cents INTEGER NOT NULL DEFAULT 0,FOREIGN KEY(account_ledger_id) REFERENCES account_ledger_old_nullable(id),FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(created_by_user_id) REFERENCES users(id),FOREIGN KEY(transaction_id) REFERENCES transactions_old_nullable(id));`);
   stale.prepare('INSERT INTO users(id,username,display_name,role,password_hash,created_at,updated_at) VALUES(?,?,?,?,?,?,?)').run('user_1','owner','Owner','OWNER','hash','now','now');
   stale.prepare('INSERT INTO campers(id,name,initial_balance_cents,current_balance_cents,updated_at) VALUES(?,?,?,?,?)').run('camper_1','Camper',1000,1000,'now');
   stale.prepare('INSERT INTO transactions(id,created_at,clerk,camper_id,camper_name,previous_balance_cents,total_cents,new_balance_cents,items_json,sale_type,payment_method,client_request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run('tx_cash','now','Owner',null,'Walk-up Cash Sale',null,750,null,'[]','cash','cash','req-tx');
   stale.prepare('INSERT INTO cash_box_sessions(opening_amount_cents,opened_at,opened_by_user_id,opened_by_name,status) VALUES(?,?,?,?,?)').run(10000,'now','user_1','Owner','open');
   stale.prepare('INSERT INTO cash_events(id,event_type,cash_received_cents,change_given_cents,created_at,client_request_id,cash_box_session_id,transaction_id,sale_total_cents,net_drawer_change_cents) VALUES(?,?,?,?,?,?,?,?,?,?)').run('cash_sale_1','cash_sale',1000,250,'now','req-cash',1,'tx_cash',750,750);
   assert.equal(stale.prepare('PRAGMA foreign_key_list(cash_events)').all().some(r => r.table === 'transactions_old_nullable'), true);
+  assert.equal(stale.prepare('PRAGMA foreign_key_list(cash_events)').all().some(r => r.table === 'account_ledger_old_nullable'), true);
   stale.close();
   execFileSync('npm', ['run', 'setup'], { cwd: path.join(__dirname, '..'), env: { ...process.env, DATABASE_PATH: dbPath, DEFAULT_OWNER_USERNAME:'', DEFAULT_OWNER_PASSWORD:'' }, stdio: 'pipe' });
   const fixed = new Database(dbPath);
   assert.equal(fixed.prepare('SELECT transaction_id FROM cash_events WHERE id=?').get('cash_sale_1').transaction_id, 'tx_cash');
-  assert.equal(fixed.prepare('PRAGMA foreign_key_list(cash_events)').all().some(r => r.table === 'transactions'), true);
-  assert.equal(fixed.prepare('PRAGMA foreign_key_list(cash_events)').all().some(r => String(r.table).includes('transactions_old_nullable')), false);
+  assert.equal(fixed.prepare('PRAGMA foreign_key_list(cash_events)').all().some(r => r.from === 'transaction_id' && r.table === 'transactions'), true);
+  assert.equal(fixed.prepare('PRAGMA foreign_key_list(cash_events)').all().some(r => r.from === 'account_ledger_id' && r.table === 'account_ledger'), true);
+  assert.equal(fixed.prepare('PRAGMA foreign_key_list(cash_events)').all().some(r => r.from === 'cash_box_session_id' && r.table === 'cash_box_sessions'), true);
+  assert.equal(fixed.prepare('PRAGMA foreign_key_list(cash_events)').all().some(r => String(r.table).includes('_old_nullable')), false);
   assert.deepEqual(fixed.prepare('PRAGMA foreign_key_check').all(), []);
-  assert.equal(fixed.prepare("SELECT count(*) c FROM sqlite_master WHERE sql LIKE '%transactions_old_nullable%'").get().c, 0);
+  assert.equal(fixed.prepare("SELECT count(*) c FROM sqlite_master WHERE sql LIKE '%_old_nullable%'").get().c, 0);
   const snapshot = JSON.stringify(fixed.prepare('SELECT * FROM cash_events ORDER BY id').all());
   fixed.close();
   execFileSync('npm', ['run', 'setup'], { cwd: path.join(__dirname, '..'), env: { ...process.env, DATABASE_PATH: dbPath, DEFAULT_OWNER_USERNAME:'', DEFAULT_OWNER_PASSWORD:'' }, stdio: 'pipe' });
