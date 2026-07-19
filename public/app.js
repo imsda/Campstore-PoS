@@ -121,7 +121,7 @@ function renderSelected() {
   if (!selected) return;
   const locked = cart.length > 0;
   $('selected').className = `balance-card ${locked ? 'sale-locked' : ''}`;
-  $('selected').innerHTML = `<div class="selected-head"><h3>${esc(selected.name)}</h3>${locked ? '<span class="lock-pill">🔒 Sale in Progress</span>' : ''}</div><p class="muted">Current balance</p><div class="amount">${fmt(selected.current_balance_cents)}</div><p>Initial balance: <b>${fmt(selected.initial_balance_cents)}</b></p>`;
+  $('selected').innerHTML = `<div class="selected-head"><h3>${esc(selected.name)}</h3>${locked ? '<span class="lock-pill">🔒 Sale in Progress</span>' : ''}</div><p class="muted">Current balance</p><div class="amount">${fmt(selected.current_balance_cents)}</div><p>Opening balance: <b>${fmt(selected.initial_balance_cents)}</b></p>`;
 }
 
 function selectCamper(id) {

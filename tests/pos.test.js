@@ -266,9 +266,22 @@ test('account ledger records sales, adjustments, people creation, direct-edit pr
 
     r = await req('POST', `/api/campers/${camperId}`, { name: 'Ledger Lily 2', person_type: 'Camper', current_balance: '99.00', initial_balance: '50.00', active: true, notes: 'x' }, cookie);
     assert.equal(r.status, 400);
-    r = await req('POST', `/api/campers/${camperId}`, { name: 'Ledger Lily 2', person_type: 'Camper', current_balance: '42.00', initial_balance: '50.00', active: true, notes: 'x' }, cookie);
+    r = await req('POST', `/api/campers/${camperId}`, { name: 'Ledger Lily 2', person_type: 'Camper', active: true, notes: 'x' }, cookie);
     assert.equal(r.status, 200);
     assert.equal(db.prepare('SELECT name,current_balance_cents FROM campers WHERE id=?').get(camperId).name, 'Ledger Lily 2');
+
+    r = await req('POST', `/api/campers/${camperId}/opening-balance-correction`, { opening_balance: '60.00', reason: 'fix import' }, cookie);
+    assert.equal(r.status, 200);
+    const corrected = db.prepare('SELECT initial_balance_cents,current_balance_cents FROM campers WHERE id=?').get(camperId);
+    assert.equal(corrected.initial_balance_cents, 6000);
+    assert.equal(corrected.current_balance_cents, 5200);
+    ledger = db.prepare("SELECT * FROM account_ledger WHERE camper_id=? AND entry_type='opening_balance_correction'").get(camperId);
+    assert.equal(ledger.amount_cents, 1000);
+    assert.equal(ledger.balance_before_cents, 4200);
+    assert.equal(ledger.balance_after_cents, 5200);
+    assert.equal(JSON.parse(ledger.metadata_json).old_opening_balance_cents, 5000);
+    r = await req('POST', `/api/campers/${camperId}/opening-balance-correction`, { opening_balance: '55.00', reason: '' }, cookie);
+    assert.equal(r.status, 400);
 
     db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('hist_camper','Hist Camper','Camper',1000,800,1,'manual','2026-01-01T00:00:00.000Z');
     db.prepare('INSERT INTO transactions(id,created_at,clerk,camper_id,camper_name,previous_balance_cents,total_cents,new_balance_cents,items_json) VALUES(?,?,?,?,?,?,?,?,?)').run('tx_hist','2026-01-02T00:00:00.000Z','Tester','hist_camper','Hist Camper',1000,200,800,'[]');
