@@ -227,21 +227,33 @@ function clearCart() {
 
 function parseCurrencyCents(v){const raw=String(v||'').trim().replace(/,/g,''); if(!/^\$?\d+(?:\.\d{1,2})?$/.test(raw)) return {valid:false,cents:0}; return {valid:true,cents:Math.round(Number(raw.replace('$',''))*100)}}
 function selectCashSale(){ if(cart.length&&saleType!=='cash') return toast('warning','Finish or Clear Current Sale',['Clear the cart before switching sale type.']); selected=null; saleType='cash'; saleCamperId='cash'; renderSelected(); renderCampers(); renderCart(); $('itemSearch').focus();}
-async function checkout() {
-  if (submittingSale) return;
-  if (!selected && saleType!=='cash') return alert('Select a camper first.');
-  if (!cart.length) return alert('Add at least one item.');
-  const saleName = saleType==='cash'?'Cash Sale':selected.name, saleTotal = total();
-  let payload={saleType, camperId:selected?.id, cart, allowOverride:false, clientRequestId:'sale_'+Date.now()+'_'+Math.random().toString(16).slice(2)}; if(saleType==='cash'){const rec=parseCurrencyCents($('cashSaleReceived').value); if(!rec.valid||rec.cents<0) return alert('Enter a valid non-negative cash amount.'); if(rec.cents<saleTotal) return alert('Cash received is insufficient.'); const lines=cart.map(l=>{const i=state.items.find(x=>x.id===l.id); return `${l.qty}x ${i.name} @ ${fmt(i.cost_cents)}`}).join('\n'); if(!confirm(`Sale type: Cash Sale\nItems:\n${lines}\nSale total: ${fmt(saleTotal)}\nCash received: ${fmt(rec.cents)}\nChange to return: ${fmt(rec.cents-saleTotal)}\nClerk: ${state.user.displayName}\nCash-box session: must be open\n\nComplete this cash sale?`)) return; payload.cashReceivedCents=rec.cents;} submittingSale=true; $('checkout').disabled=true;
-  const r = await fetch('/api/sale', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-  });
-  const data = await r.json();
-  if (!r.ok){submittingSale=false; $('checkout').disabled=false; return alert(data.error);}
-  await load();
-  const updated = state.campers.find(c => c.id === data.camperId);
-  if (updated) updated.current_balance_cents = data.new_balance_cents;
-  if(saleType==='cash'){ $('saleResult').hidden=false; $('saleResult').innerHTML=`<span>Cash Sale completed</span><b>Change to Return: ${fmt(data.change_given_cents)}</b><em>Sale ${data.id} · Total ${fmt(data.total_cents)} · Cash received ${fmt(data.cash_received_cents)} · Clerk ${esc(state.user.displayName)}${data.cash_box_expected_cents!=null?' · Expected cash '+fmt(data.cash_box_expected_cents):''}</em>`; toast('success','✓ Cash Sale Complete',[fmt(saleTotal),'Change '+fmt(data.change_given_cents)]); cart=[]; saleCamperId=null; renderCart(); } else {toast('success', '✓ Sale Complete', [saleName, fmt(saleTotal), 'Queued for Google Sync']); resetSaleWorkflow();} submittingSale=false; $('checkout').disabled=false;
+function cashSaleLines(){return cart.map(l=>{const i=state.items.find(x=>x.id===l.id); return {...l,item:i,line_total_cents:i.cost_cents*l.qty}})}
+function saleFriendlyMessage(data){if(data?.code==='CASH_SALE_FAILED') return 'The cash sale could not be recorded. No inventory or cash totals were changed.'; return data?.error||'The sale could not be completed.'}
+let lastFocus=null;
+function trapModal(backdrop){const f=[...backdrop.querySelectorAll('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')].filter(x=>!x.disabled&&!x.hidden); const first=f[0], last=f[f.length-1]; backdrop.onkeydown=e=>{if(e.key==='Escape'&&!submittingSale){closeSaleModal();return} if(e.key!=='Tab'||!f.length)return; if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus()} else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}}; setTimeout(()=>first?.focus(),0)}
+function openSaleModal(html){lastFocus=document.activeElement; const m=$('saleModal'); $('saleModalBody').innerHTML=html; m.hidden=false; trapModal(m)}
+function closeSaleModal(){const m=$('saleModal'); m.hidden=true; $('saleModalBody').innerHTML=''; m.onkeydown=null; (lastFocus||$('checkout'))?.focus?.()}
+function cashSaleConfirmHtml(rec,saleTotal){const rows=cashSaleLines().map(l=>`<tr><td>${esc(l.item.name)}</td><td>${l.qty}</td><td>${fmt(l.item.cost_cents)}</td><td><b>${fmt(l.line_total_cents)}</b></td></tr>`).join(''); return `<section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="saleModalTitle"><div class="modal-head"><div><p class="eyebrow">Walk-up checkout</p><h2 id="saleModalTitle">Confirm Cash Sale</h2></div><button class="secondary" type="button" onclick="closeSaleModal()">Cancel</button></div><div class="confirm-grid"><div><b>Sale type</b>Cash Sale</div><div><b>Clerk</b>${esc(state.user.displayName)}</div><div><b>Cash-box status</b>Open cash-box session required</div><div><b>Change to return</b>${fmt(rec.cents-saleTotal)}</div></div><div class="table-scroll"><table><thead><tr><th>Item</th><th>Qty</th><th>Unit price</th><th>Line total</th></tr></thead><tbody>${rows}</tbody></table></div><div class="change-return big"><span>Sale total</span><b>${fmt(saleTotal)}</b></div><div class="confirm-grid"><div><b>Cash received</b>${fmt(rec.cents)}</div><div><b>Change to return</b>${fmt(rec.cents-saleTotal)}</div></div><div class="dialog-footer"><button id="confirmCashSale" class="primary" type="button" onclick="submitCheckout()">Complete Cash Sale</button><button class="secondary" type="button" onclick="closeSaleModal()">Cancel</button></div></section>`}
+function cashSaleErrorHtml(message){return `<section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="saleModalTitle"><div class="modal-head"><div><p class="eyebrow">Sale not recorded</p><h2 id="saleModalTitle">Cash Sale Failed</h2></div><button class="secondary" type="button" onclick="closeSaleModal()">Close</button></div><div class="change-box bad-box"><b>${esc(message)}</b><em>The cart and cash received amount were preserved so you can retry.</em></div><div class="dialog-footer"><button class="primary" type="button" onclick="closeSaleModal(); checkout();">Retry</button><button class="secondary" type="button" onclick="closeSaleModal()">Close</button></div></section>`}
+function cashSaleSuccessHtml(data){return `<section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="saleModalTitle"><div class="modal-head"><div><p class="eyebrow">Sale completed</p><h2 id="saleModalTitle">Sale completed</h2></div></div><div class="change-return big"><span>Change to return</span><b>${fmt(data.change_given_cents)}</b></div><div class="confirm-grid"><div><b>Sale total</b>${fmt(data.total_cents)}</div><div><b>Cash received</b>${fmt(data.cash_received_cents)}</div><div><b>Transaction reference</b>${esc(data.id)}</div><div><b>Expected cash-box total</b>${data.cash_box_expected_cents!=null?fmt(data.cash_box_expected_cents):'—'}</div></div><div class="dialog-footer"><button class="primary" type="button" onclick="finishCashSale(false)">Done</button><button class="secondary" type="button" onclick="finishCashSale(true)">New Cash Sale</button></div></section>`}
+function finishCashSale(newCash){closeSaleModal(); cart=[]; saleCamperId=newCash?'cash':null; saleType=newCash?'cash':'account'; if(!newCash) selected=null; $('cashSaleReceived').value=''; $('saleResult').hidden=true; renderSelected(); renderCampers(); renderCart(); (newCash?$('itemSearch'):$('camperSearch')).focus()}
+async function checkout(){
+  if(submittingSale) return;
+  if(!selected&&saleType!=='cash') return toast('warning','Select a camper first.');
+  if(!cart.length) return toast('warning','Add at least one item.');
+  const saleTotal=total();
+  if(saleType==='cash'){const rec=parseCurrencyCents($('cashSaleReceived').value); if(!rec.valid||rec.cents<0) return toast('warning','Enter a valid non-negative cash amount.'); if(rec.cents<saleTotal) return toast('warning','Cash received is insufficient.'); openSaleModal(cashSaleConfirmHtml(rec,saleTotal)); return}
+  await submitCheckout();
+}
+async function submitCheckout(){
+  if(submittingSale) return; submittingSale=true; $('checkout').disabled=true; const btn=$('confirmCashSale'); if(btn){btn.disabled=true;btn.textContent='Recording…'}
+  const saleTotal=total(), saleName=saleType==='cash'?'Cash Sale':selected.name, rec=saleType==='cash'?parseCurrencyCents($('cashSaleReceived').value):null;
+  const payload={saleType,camperId:selected?.id,cart,allowOverride:false,clientRequestId:'sale_'+Date.now()+'_'+Math.random().toString(16).slice(2)}; if(saleType==='cash') payload.cashReceivedCents=rec.cents;
+  let r,data; try{r=await fetch('/api/sale',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); data=await r.json().catch(()=>({error:'The sale could not be completed.'}))}catch(e){data={error:'Network error while recording the sale.'}; r={ok:false}}
+  submittingSale=false; $('checkout').disabled=false;
+  if(!r.ok){console.error('[cash sale] failed',data); if(saleType==='cash') openSaleModal(cashSaleErrorHtml(saleFriendlyMessage(data))); else toast('error','Sale Failed',[saleFriendlyMessage(data)]); return}
+  await load(); const updated=state.campers.find(c=>c.id===data.camperId); if(updated) updated.current_balance_cents=data.new_balance_cents;
+  if(saleType==='cash'){openSaleModal(cashSaleSuccessHtml(data)); toast('success','✓ Cash Sale Complete',[fmt(saleTotal),'Change '+fmt(data.change_given_cents)])} else {toast('success','✓ Sale Complete',[saleName,fmt(saleTotal),'Queued for Google Sync']); resetSaleWorkflow()}
 }
 
 // Live refresh so multiple stations (registration, clerks) see each other's

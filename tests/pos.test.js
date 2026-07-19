@@ -667,3 +667,53 @@ test('nullable transaction migration copy failure rolls back original tables', (
   assert.equal(check.prepare('SELECT count(*) c FROM transactions').get().c, 2);
   check.close();
 });
+
+test('repairs stale cash_events foreign key referencing transactions_old_nullable idempotently', () => {
+  const os = require('node:os');
+  const Database = require('better-sqlite3');
+  const { execFileSync } = require('node:child_process');
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'campstore-stale-fk-')), 'test.sqlite');
+  const stale = new Database(dbPath);
+  stale.pragma('foreign_keys = OFF');
+  stale.exec(`CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+    CREATE TABLE items(id TEXT PRIMARY KEY,name TEXT NOT NULL,cost_cents INTEGER NOT NULL,category TEXT NOT NULL DEFAULT 'Uncategorized',active INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL,stock_qty INTEGER);
+    CREATE TABLE campers(id TEXT PRIMARY KEY,name TEXT NOT NULL,person_type TEXT NOT NULL DEFAULT 'Camper',initial_balance_cents INTEGER NOT NULL,current_balance_cents INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 1,source TEXT NOT NULL DEFAULT 'manual',updated_at TEXT NOT NULL);
+    CREATE TABLE users(id TEXT PRIMARY KEY,username TEXT NOT NULL UNIQUE,display_name TEXT NOT NULL,role TEXT NOT NULL,password_hash TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE TABLE transactions(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,clerk TEXT,camper_id TEXT,camper_name TEXT,previous_balance_cents INTEGER,total_cents INTEGER NOT NULL,new_balance_cents INTEGER,items_json TEXT NOT NULL,sync_status TEXT NOT NULL DEFAULT 'pending',synced_at TEXT,error TEXT,sale_type TEXT NOT NULL DEFAULT 'account',payment_method TEXT NOT NULL DEFAULT 'account',cash_box_session_id INTEGER,cash_received_cents INTEGER,change_given_cents INTEGER,client_request_id TEXT UNIQUE,FOREIGN KEY(camper_id) REFERENCES campers(id));
+    CREATE TABLE balance_adjustments(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,admin TEXT,camper_id TEXT NOT NULL,camper_name TEXT NOT NULL,action TEXT NOT NULL,amount_cents INTEGER,previous_balance_cents INTEGER NOT NULL,new_balance_cents INTEGER NOT NULL,reason TEXT NOT NULL,sync_status TEXT NOT NULL DEFAULT 'pending',synced_at TEXT,error TEXT);
+    CREATE TABLE audit_logs(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,admin TEXT,action TEXT NOT NULL);
+    CREATE TABLE account_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT,camper_id TEXT NOT NULL,entry_type TEXT NOT NULL,amount_cents INTEGER NOT NULL,balance_before_cents INTEGER NOT NULL,balance_after_cents INTEGER NOT NULL,payment_method TEXT,reason TEXT,transaction_id TEXT,balance_adjustment_id TEXT,audit_log_id TEXT,created_by_user_id TEXT,created_by_name TEXT,created_at TEXT NOT NULL,metadata_json TEXT,FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(transaction_id) REFERENCES transactions(id),FOREIGN KEY(created_by_user_id) REFERENCES users(id));
+    CREATE TABLE cash_box_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,opening_amount_cents INTEGER NOT NULL,opened_at TEXT NOT NULL,opened_by_user_id TEXT,opened_by_name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open');
+    CREATE TABLE cash_events(id TEXT PRIMARY KEY,account_ledger_id INTEGER,camper_id TEXT,event_type TEXT NOT NULL,amount_credited_cents INTEGER NOT NULL DEFAULT 0,cash_received_cents INTEGER NOT NULL,change_given_cents INTEGER NOT NULL,reason TEXT,created_by_user_id TEXT,created_by_name TEXT,created_at TEXT NOT NULL,client_request_id TEXT UNIQUE,cash_box_session_id INTEGER,transaction_id TEXT,sale_total_cents INTEGER NOT NULL DEFAULT 0,net_drawer_change_cents INTEGER NOT NULL DEFAULT 0,FOREIGN KEY(account_ledger_id) REFERENCES account_ledger(id),FOREIGN KEY(camper_id) REFERENCES campers(id),FOREIGN KEY(created_by_user_id) REFERENCES users(id),FOREIGN KEY(transaction_id) REFERENCES transactions_old_nullable(id));`);
+  stale.prepare('INSERT INTO users(id,username,display_name,role,password_hash,created_at,updated_at) VALUES(?,?,?,?,?,?,?)').run('user_1','owner','Owner','OWNER','hash','now','now');
+  stale.prepare('INSERT INTO campers(id,name,initial_balance_cents,current_balance_cents,updated_at) VALUES(?,?,?,?,?)').run('camper_1','Camper',1000,1000,'now');
+  stale.prepare('INSERT INTO transactions(id,created_at,clerk,camper_id,camper_name,previous_balance_cents,total_cents,new_balance_cents,items_json,sale_type,payment_method,client_request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run('tx_cash','now','Owner',null,'Walk-up Cash Sale',null,750,null,'[]','cash','cash','req-tx');
+  stale.prepare('INSERT INTO cash_box_sessions(opening_amount_cents,opened_at,opened_by_user_id,opened_by_name,status) VALUES(?,?,?,?,?)').run(10000,'now','user_1','Owner','open');
+  stale.prepare('INSERT INTO cash_events(id,event_type,cash_received_cents,change_given_cents,created_at,client_request_id,cash_box_session_id,transaction_id,sale_total_cents,net_drawer_change_cents) VALUES(?,?,?,?,?,?,?,?,?,?)').run('cash_sale_1','cash_sale',1000,250,'now','req-cash',1,'tx_cash',750,750);
+  assert.equal(stale.prepare('PRAGMA foreign_key_list(cash_events)').all().some(r => r.table === 'transactions_old_nullable'), true);
+  stale.close();
+  execFileSync('npm', ['run', 'setup'], { cwd: path.join(__dirname, '..'), env: { ...process.env, DATABASE_PATH: dbPath, DEFAULT_OWNER_USERNAME:'', DEFAULT_OWNER_PASSWORD:'' }, stdio: 'pipe' });
+  const fixed = new Database(dbPath);
+  assert.equal(fixed.prepare('SELECT transaction_id FROM cash_events WHERE id=?').get('cash_sale_1').transaction_id, 'tx_cash');
+  assert.equal(fixed.prepare('PRAGMA foreign_key_list(cash_events)').all().some(r => r.table === 'transactions'), true);
+  assert.equal(fixed.prepare('PRAGMA foreign_key_list(cash_events)').all().some(r => String(r.table).includes('transactions_old_nullable')), false);
+  assert.deepEqual(fixed.prepare('PRAGMA foreign_key_check').all(), []);
+  assert.equal(fixed.prepare("SELECT count(*) c FROM sqlite_master WHERE sql LIKE '%transactions_old_nullable%'").get().c, 0);
+  const snapshot = JSON.stringify(fixed.prepare('SELECT * FROM cash_events ORDER BY id').all());
+  fixed.close();
+  execFileSync('npm', ['run', 'setup'], { cwd: path.join(__dirname, '..'), env: { ...process.env, DATABASE_PATH: dbPath, DEFAULT_OWNER_USERNAME:'', DEFAULT_OWNER_PASSWORD:'' }, stdio: 'pipe' });
+  const again = new Database(dbPath);
+  assert.equal(JSON.stringify(again.prepare('SELECT * FROM cash_events ORDER BY id').all()), snapshot);
+  assert.equal(again.prepare("SELECT count(*) c FROM sqlite_master WHERE name LIKE '%stale_fk%' OR name LIKE '%old_nullable%'").get().c, 0);
+  again.close();
+});
+
+test('cash sale workflow source uses application modals instead of browser dialogs', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const cashWorkflow = source.slice(source.indexOf('function cashSaleLines'), source.indexOf('// Live refresh'));
+  assert.doesNotMatch(cashWorkflow, /\b(?:window\.)?(?:confirm|alert|prompt)\s*\(/);
+  assert.match(cashWorkflow, /Confirm Cash Sale/);
+  assert.match(cashWorkflow, /Cash Sale Failed/);
+  assert.match(cashWorkflow, /Sale completed/);
+  assert.match(cashWorkflow, /Complete Cash Sale/);
+});
