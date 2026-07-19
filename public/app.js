@@ -1,4 +1,4 @@
-let state = {}, selected = null, cart = [], selectedCategory = null, saleCamperId = null, selectedCabin = null;
+let state = {}, selected = null, cart = [], selectedCategory = null, saleCamperId = null, selectedCabin = null, saleType = 'account', submittingSale = false;
 const $ = id => document.getElementById(id), fmt = c => '$' + (c / 100).toFixed(2);
 
 async function logout() {
@@ -37,7 +37,7 @@ function resetSaleWorkflow() {
   $('camperSearch').value = '';
   $('itemSearch').value = '';
   $('selected').className = 'balance-card muted';
-  $('selected').textContent = 'No camper selected';
+  saleType = 'account'; $('cashSaleReceived').value=''; $('saleResult').hidden=true; $('selected').textContent = 'No camper selected';
   renderCabins();
   renderCampers();
   renderItems();
@@ -119,6 +119,9 @@ function renderCampers() {
 }
 
 function renderSelected() {
+  const isCash=saleType==='cash';
+  $('newBalRow').hidden=isCash; $('cashCheckout').hidden=!isCash;
+  if(isCash){$('selected').className='balance-card'; $('selected').innerHTML='<div class="selected-head"><h3>Cash Sale</h3><span class="lock-pill">Walk-up Cash Customer</span></div><p>No camper account selected. No camper balance will change.</p>'; return}
   if (!selected) return;
   const locked = cart.length > 0;
   $('selected').className = `balance-card ${locked ? 'sale-locked' : ''}`;
@@ -132,6 +135,7 @@ function selectCamper(id) {
     return;
   }
   selected = state.campers.find(c => c.id === id);
+  saleType = 'account';
   renderSelected();
   renderCampers();
   renderCart();
@@ -170,12 +174,12 @@ function renderItems() {
 }
 
 function addItem(id) {
-  if (!selected) {
-    toast('warning', 'Select a Camper First', ['Choose a camper before adding items to the cart.']);
+  if (!selected && saleType!=='cash') {
+    toast('warning', 'Select a Customer First', ['Choose a camper or Cash Sale before adding items to the cart.']);
     $('camperSearch').focus();
     return;
   }
-  if (!saleCamperId) saleCamperId = selected.id;
+  if (saleType==='cash') saleCamperId='cash'; else if (!saleCamperId) saleCamperId = selected.id;
   const l = cart.find(x => x.id === id);
   l ? l.qty++ : cart.push({ id, qty: 1 });
   renderSelected();
@@ -206,9 +210,10 @@ function renderCart() {
   }).join('') || '<p class="muted">No items yet.</p>';
   const t = total();
   $('total').textContent = fmt(t);
-  const nb = selected ? selected.current_balance_cents - t : null;
-  $('newBal').textContent = selected ? fmt(nb) : '—';
-  $('warn').innerHTML = selected && nb < 0 ? '<span class="danger">Warning: purchase exceeds current balance.</span>' : '';
+  const nb = selected&&saleType!=='cash' ? selected.current_balance_cents - t : null;
+  $('newBal').textContent = selected&&saleType!=='cash' ? fmt(nb) : '—';
+  const rec=parseCurrencyCents($('cashSaleReceived')?.value||''); const change=rec.valid?rec.cents-t:null; if(saleType==='cash'){ $('cashSaleChange').textContent=rec.valid?fmt(change):'—'; $('cashSaleValidation').textContent=!rec.valid?'Enter a valid non-negative cash amount.':change<0?'Cash received is insufficient.':'Ready: return '+fmt(change)+' change.';}
+  $('warn').innerHTML = selected && saleType!=='cash' && nb < 0 ? '<span class="danger">Warning: purchase exceeds current balance.</span>' : '';
 }
 
 function clearCart() {
@@ -220,22 +225,23 @@ function clearCart() {
   $('itemSearch').focus();
 }
 
+function parseCurrencyCents(v){const raw=String(v||'').trim().replace(/,/g,''); if(!/^\$?\d+(?:\.\d{1,2})?$/.test(raw)) return {valid:false,cents:0}; return {valid:true,cents:Math.round(Number(raw.replace('$',''))*100)}}
+function selectCashSale(){ if(cart.length&&saleType!=='cash') return toast('warning','Finish or Clear Current Sale',['Clear the cart before switching sale type.']); selected=null; saleType='cash'; saleCamperId='cash'; renderSelected(); renderCampers(); renderCart(); $('itemSearch').focus();}
 async function checkout() {
-  if (!selected) return alert('Select a camper first.');
+  if (submittingSale) return;
+  if (!selected && saleType!=='cash') return alert('Select a camper first.');
   if (!cart.length) return alert('Add at least one item.');
-  const saleName = selected.name, saleTotal = total();
+  const saleName = saleType==='cash'?'Cash Sale':selected.name, saleTotal = total();
+  let payload={saleType, camperId:selected?.id, cart, allowOverride:false, clientRequestId:'sale_'+Date.now()+'_'+Math.random().toString(16).slice(2)}; if(saleType==='cash'){const rec=parseCurrencyCents($('cashSaleReceived').value); if(!rec.valid||rec.cents<0) return alert('Enter a valid non-negative cash amount.'); if(rec.cents<saleTotal) return alert('Cash received is insufficient.'); const lines=cart.map(l=>{const i=state.items.find(x=>x.id===l.id); return `${l.qty}x ${i.name} @ ${fmt(i.cost_cents)}`}).join('\n'); if(!confirm(`Sale type: Cash Sale\nItems:\n${lines}\nSale total: ${fmt(saleTotal)}\nCash received: ${fmt(rec.cents)}\nChange to return: ${fmt(rec.cents-saleTotal)}\nClerk: ${state.user.displayName}\nCash-box session: must be open\n\nComplete this cash sale?`)) return; payload.cashReceivedCents=rec.cents;} submittingSale=true; $('checkout').disabled=true;
   const r = await fetch('/api/sale', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ camperId: selected.id, cart, allowOverride: false })
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
   });
   const data = await r.json();
-  if (!r.ok) return alert(data.error);
+  if (!r.ok){submittingSale=false; $('checkout').disabled=false; return alert(data.error);}
   await load();
   const updated = state.campers.find(c => c.id === data.camperId);
   if (updated) updated.current_balance_cents = data.new_balance_cents;
-  toast('success', '✓ Sale Complete', [saleName, fmt(saleTotal), 'Queued for Google Sync']);
-  resetSaleWorkflow();
+  if(saleType==='cash'){ $('saleResult').hidden=false; $('saleResult').innerHTML=`<span>Cash Sale completed</span><b>Change to Return: ${fmt(data.change_given_cents)}</b><em>Sale ${data.id} · Total ${fmt(data.total_cents)} · Cash received ${fmt(data.cash_received_cents)} · Clerk ${esc(state.user.displayName)}${data.cash_box_expected_cents!=null?' · Expected cash '+fmt(data.cash_box_expected_cents):''}</em>`; toast('success','✓ Cash Sale Complete',[fmt(saleTotal),'Change '+fmt(data.change_given_cents)]); cart=[]; saleCamperId=null; renderCart(); } else {toast('success', '✓ Sale Complete', [saleName, fmt(saleTotal), 'Queued for Google Sync']); resetSaleWorkflow();} submittingSale=false; $('checkout').disabled=false;
 }
 
 // Live refresh so multiple stations (registration, clerks) see each other's
@@ -323,3 +329,5 @@ $('quickAddForm').onsubmit = quickAddCamper;
 $('cashDepositBtn').onclick = openCashModal; $('cashClose').onclick = closeCashModal; $('cashPersonSearch').oninput = renderCashPeople; $('cashAmount').oninput = updateCashCalc; $('cashReceived').oninput = updateCashCalc; $('cashReview').onclick = showCashConfirm;
 setInterval(refreshState, 8000);
 load();
+
+$('cashSaleBtn').onclick=selectCashSale; $('cashSaleReceived').oninput=renderCart;

@@ -34,7 +34,7 @@
 <div class="pos">
 <section class="panel">
 <div class="panel-head">
-<h2>1. Pick a cabin, then the camper</h2>
+<h2>1. Pick a customer</h2>
 <button id="addCamperBtn" class="mini-add" type="button">+ Add camper</button>
 </div>
 <form id="quickAddForm" class="quick-add" hidden>
@@ -51,6 +51,7 @@
 </form>
 <datalist id="cabinOptions">
 </datalist>
+<button id="cashSaleBtn" class="primary full" type="button">Cash Sale / Walk-up Customer</button>
 <div id="cabinBar" class="cabin-bar">
 </div>
 <input id="camperSearch" placeholder="🔍 Or type a child's name…" autofocus>
@@ -58,7 +59,7 @@
 </div>
 </section>
 <section class="panel">
-<h2>2. Camper balance</h2>
+<h2>2. Customer / balance</h2>
 <div id="selected" class="balance-card muted">No camper selected</div>
 </section>
 <section class="panel">
@@ -74,10 +75,10 @@
 <div class="totals">
 <div>Total <b id="total">$0.00</b>
 </div>
-<div>New balance <b id="newBal">—</b>
+<div id="newBalRow">New balance <b id="newBal">—</b>
 </div>
 </div>
-<button id="checkout" class="primary full">Complete Sale</button>
+<div id="cashCheckout" hidden><label>Cash received<input id="cashSaleReceived" inputmode="decimal" placeholder="0.00"></label><div class="change-box"><span>Change Owed</span><b id="cashSaleChange">—</b><em id="cashSaleValidation">Enter cash received.</em></div></div><button id="checkout" class="primary full">Complete Sale</button><div id="saleResult" class="change-box" hidden></div>
 <button id="clear" class="secondary full">Clear Cart</button>
 <p id="warn">
 </p>
