@@ -431,6 +431,8 @@ test('cash account deposits credit amount, calculate change, store cash details,
   const base = `http://127.0.0.1:${server.address().port}`;
   const login = async username => (await fetch(`${base}/api/login`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username,password:'secret123'}) })).headers.get('set-cookie').split(';')[0];
   try {
+    const ownerCookie = await login('cashowner');
+    assert.equal((await fetch(`${base}/api/cash-box/open`, { method:'POST', headers:{'Content-Type':'application/json', cookie:ownerCookie}, body:JSON.stringify({opening_amount_cents:10000}) })).status, 200);
     const cookie = await login('cashclerk');
     const post = body => fetch(`${base}/api/cash-deposits`, { method:'POST', headers:{'Content-Type':'application/json', cookie}, body:JSON.stringify(body) });
     let r = await post({ camper_id:'cash_camper', amount_added_cents:1500, cash_received_cents:2000, reason:'snack money', client_request_id:'req-1' });
@@ -488,4 +490,66 @@ test('cash deposit endpoint rejects users without clerk permission', async () =>
   const server = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); }); const base = `http://127.0.0.1:${server.address().port}`;
   try { const login = await fetch(`${base}/api/login`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:'nopage',password:'secret123'}) }); const cookie = login.headers.get('set-cookie').split(';')[0]; const r = await fetch(`${base}/api/cash-deposits`, { method:'POST', headers:{'Content-Type':'application/json', cookie}, body:JSON.stringify({camper_id:'p',amount_added_cents:100,cash_received_cents:100}) }); assert.equal(r.status, 403); }
   finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('cash box permissions, summary, corrections, adjustments, and session activity', async () => {
+  const os = require('node:os');
+  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'campstore-cashbox-')), 'test.sqlite');
+  process.env.DATABASE_PATH = dbPath; process.env.DEFAULT_OWNER_USERNAME = 'boxowner'; process.env.DEFAULT_OWNER_PASSWORD = 'secret123'; process.env.SESSION_SECRET = 'box-secret';
+  delete require.cache[require.resolve('../server')];
+  const { app, db, hashPassword } = require('../server');
+  const stamp = new Date().toISOString();
+  db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('admin','admin','Admin User','ADMIN',hashPassword('secret123'),1,stamp,stamp);
+  db.prepare('INSERT INTO users(id,username,display_name,role,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('clerk','clerk','Clerk User','CLERK',hashPassword('secret123'),1,stamp,stamp);
+  db.prepare('INSERT INTO user_page_permissions(user_id,permission_key,allowed,created_at,updated_at) VALUES(?,?,?,?,?)').run('clerk','page.cash_box',1,stamp,stamp);
+  db.prepare('INSERT INTO campers(id,name,person_type,initial_balance_cents,current_balance_cents,active,source,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('camper','Camper Cash','Camper',0,0,1,'manual',stamp);
+  const server = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = async username => (await fetch(`${base}/api/login`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username,password:'secret123'}) })).headers.get('set-cookie').split(';')[0];
+  const post = (cookie, p, b) => fetch(base+p, { method:'POST', headers:{'Content-Type':'application/json', cookie}, body:JSON.stringify(b) });
+  try {
+    const owner = await login('boxowner'), admin = await login('admin'), clerk = await login('clerk');
+    assert.equal((await fetch(`${base}/cash-box`, { headers:{cookie:clerk, accept:'text/html'} })).status, 200);
+    assert.equal((await post(clerk, '/api/cash-box/open', { opening_amount_cents:10000 })).status, 403);
+    assert.equal((await post(admin, '/api/cash-box/open', { opening_amount:'bad' })).status, 400);
+    assert.equal((await post(admin, '/api/cash-box/open', { opening_amount:'-1.00' })).status, 400);
+    let r = await post(admin, '/api/cash-box/open', { opening_amount_cents:10000 });
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).session.opening_amount_cents, 10000);
+    assert.equal((await post(owner, '/api/cash-box/open', { opening_amount_cents:0 })).status, 400);
+    assert.equal((await post(clerk, '/api/cash-box/current/correct-initial', { opening_amount_cents:9000, reason:'nope' })).status, 403);
+    assert.equal((await post(admin, '/api/cash-box/current/correct-initial', { opening_amount_cents:9000 })).status, 400);
+    r = await post(owner, '/api/cash-box/current/correct-initial', { opening_amount_cents:10000, reason:'count verified' });
+    assert.equal(r.status, 200);
+    assert.ok(db.prepare("SELECT * FROM audit_logs WHERE action='cash_box_initial_corrected'").get());
+    r = await post(clerk, '/api/cash-deposits', { camper_id:'camper', amount_added_cents:2000, cash_received_cents:2500, reason:'deposit', client_request_id:'cb-1' });
+    assert.equal(r.status, 200);
+    assert.equal(db.prepare('SELECT cash_box_session_id FROM cash_events WHERE client_request_id=?').get('cb-1').cash_box_session_id, 1);
+    assert.equal((await post(admin, '/api/cash-box/current/adjustments', { adjustment_type:'cash_added', amount_cents:300, reason:'change money' })).status, 200);
+    assert.equal((await post(admin, '/api/cash-box/current/adjustments', { adjustment_type:'cash_removed', amount_cents:100, reason:'safe drop' })).status, 200);
+    const cur = await (await fetch(`${base}/api/cash-box/current`, { headers:{cookie:clerk} })).json();
+    assert.equal(cur.summary.cash_sales_cents, 0);
+    assert.equal(cur.summary.account_deposits_credited_cents, 2000);
+    assert.equal(cur.summary.cash_received_cents, 2500);
+    assert.equal(cur.summary.change_given_cents, 500);
+    assert.equal(cur.summary.expected_cash_cents, 12200);
+    assert.ok(cur.activity.some(a => a.type === 'Account Deposit' && a.person_or_sale === 'Camper Cash' && a.net_drawer_change_cents === 2000));
+    assert.equal(db.prepare('SELECT current_balance_cents FROM campers WHERE id=?').get('camper').current_balance_cents, 2000);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('Cash Box frontend declares protected route, cards, admin controls, and activity table', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'cash-box.html'), 'utf8');
+  const js = fs.readFileSync(path.join(__dirname, '..', 'public', 'cash-box.js'), 'utf8');
+  const { PAGE_REGISTRY } = require('../server');
+  assert.ok(PAGE_REGISTRY.some(p => p.key === 'page.cash_box' && p.route === '/cash-box'));
+  assert.match(html, /Cash Box/);
+  assert.match(js, /Initial in Box/);
+  assert.match(js, /Total Cash Sales/);
+  assert.match(js, /Cash Added to Accounts/);
+  assert.match(js, /Cash Received/);
+  assert.match(js, /Change Given/);
+  assert.match(js, /Expected in Box/);
+  assert.match(js, /canAdmin/);
+  assert.match(html, /activityRows/);
 });
